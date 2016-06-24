@@ -1,16 +1,36 @@
 '''This class extends pexpect.spawn to simulate device handles and 
 related operation methods
 TODO - exception handling
+
+Environment Variables Supported and their Default Values
+
+       * PYNT_USER:         pynt
+       * PYNT_PASSWORD:     PyNT123
+       * PYNT_ROOTPW:       PyNt!2#
+       * PYNT_SSH_KEY:      ~/.ssh/id_rsa
+       * PYNT_LOGFILE:      nt.log
+       * PYNT_AWS_KEYFILE:  ''
+       * PYNT_AWS_KEYNAME:  ''
+       * PYNT_AWS_AMI_VMX:  ami-2cbec54c # Mar 27, 2016
+       * PYNT_AWS_AMI_LNX:  ami-06116566 # Ubuntu 14.04
+       * PYNT_AWS_LNX_TYPE: t2.micro
+       * PYNT_AWS_VMX_TYPE: m4.xlarge
+       * PYNT_AWS_REGION:   us-west-1
+       * PYNT_AWS_VPC_NAME: w01
+
 '''
 from __future__ import print_function
 import time,datetime
 import os,sys,re
 import getopt,pexpect
-import socket, struct
+import socket, struct, fcntl, threading
 import binascii,logging
+import xml.etree.ElementTree as ET
+import pprint
 
 try:
     import pexpect.pxssh
+    from pysnmp.hlapi import *
 except ImportError: # pragma: no cover
     err = sys.exc_info()[1]
     raise ImportError(str(err) + '''Not all modules were found. Please check Operating System and Python Modules.
@@ -24,7 +44,6 @@ __revision__ = ""
 #__all__ = ['ExceptionPyNT', 'new', 'cmd', '__version__', '__revision__']
 
 PY3 = (sys.version_info[0] >=3)
-PYNT_LOGFILE = os.environ.get('PYNT_LOGFILE', 'nt.log')
 #PROMPT = '[>#%\$](?:\033\[0m \S*)?\s*$'
 PROMPT = '[>#%\$] $'
 PROMPT_MORE = '^ --More--[\s\b]*';
@@ -37,25 +56,40 @@ reIp4Addr = re.compile(ip4Addr)
 reIp6Addr = re.compile(ip6Addr)
 reIpAddr = re.compile(ipAddr)
 
-def get_ini():
+pp = pprint.PrettyPrinter(indent=4)
+
+ntini = {}
+def _get_env():
     ini_values = {
         'USER':         'pynt',
         'PASSWORD':     'PyNT123',
         'ROOTPW':       'PyNt!2#',
+        'SSH_KEY':      '~/.ssh/id_rsa',
+        'LOGFILE':      'nt.log',
+        'AWS_KEYFILE':  '',
+        'AWS_KEYNAME':  '',
+        'AWS_AMI_VMX':  'ami-2cbec54c', # Mar 27, 2016
+        'AWS_AMI_LNX':  'ami-06116566', # Ubuntu 14.04
+        'AWS_LNX_TYPE': 't2.micro',
+        'AWS_VMX_TYPE': 'm4.xlarge',
+        'AWS_REGION':   'us-west-1',
+        'AWS_VPC_NAME': 'w01',
     }
-    ini = []
     for key, value in ini_values.iteritems():
-        ini[key] = os.environ.get('PYNT_' + key, value)
-    return ini
+        ntini[key] = os.environ.get('PYNT_' + key, value)
+        if key in ('SSH_KEY', 'AWS_KEYFILE'):
+            m = re.search("^~/", ntini[key])
+            if m:
+                ntini[key] = os.path.expanduser(ntini[key])
 
-ini = get_ini()
+_get_env()
 
 def ntlogger():
     logLevel = logging.DEBUG
     nlog = logging.getLogger('pynt')
     nlog.setLevel(logLevel)
     #nlog.setLevel(logLevel)
-    fh = logging.FileHandler(PYNT_LOGFILE)
+    fh = logging.FileHandler(ntini['LOGFILE'])
     fh.setLevel(logLevel)
     ch = logging.StreamHandler()
     ch.setLevel(logLevel)
@@ -207,6 +241,27 @@ def chk_ip(ip):
     else:
         return 0
 
+def sort_ip(ips):
+    '''Get a list of IPv4 addresses, and return a list of sorted IPs
+    if there is an invalid IPv4 element, return False
+    '''
+    result = []
+    valid = True
+    if type(ips) is not list:
+        valid = False
+    for ip in ips:
+        if chk_ip(ip) != socket.AF_INET :
+            valid = False
+            break
+    if valid:
+        return sorted(ips, key=lambda ip: struct.unpack("!L", 
+            socket.inet_aton(ip))[0])
+    else:
+        ntlog("sort_ip: only list of IPv4 addresses is supported. Aborting...",
+            logging.ERROR)
+        return valid
+
+
 def ntlog(msg, level=logging.INFO) :
     '''
     Standard logging with timestamp, level. facility and user TBD
@@ -230,6 +285,56 @@ def sleep(interval):
     sys.stdout.write("\n")
     sys.stdout.flush()
     return True
+
+def get_dict_leaf(dictionary, path, separator='.'):
+    '''extract a leaf of chained dictionary and keys joined with 
+    separators'''
+    paths = path.split(separator)
+    root = dictionary
+    for idx in range(len(paths)):
+        key = paths[idx]
+        if key.isdigit():
+            key = int(key)
+        if (type(root) is dict and key in root) or \
+            (type(root) is list and key < len(root)):
+            root = root[key]
+        else:
+            ntlog("get_dict_leaf does not contain key %s" % str(key), logging.ERROR)
+            return None
+    return root
+    
+def chk_host_port(host, port, interval=5, timeout=30, family=socket.AF_INET):
+    '''Check host:port reacheability'''
+    ts_start = time.time()
+    hostup = False
+    while time.time() - ts_start <= timeout:
+        try:
+            s = socket.socket(family, socket.SOCK_STREAM)
+            s.settimeout(0.5)
+            s.connect((host, port))
+            ntlog("Host %s is reachable at port %d" %(host, port))
+            hostup = True
+            s.close()
+            break
+        except socket.error as e:
+            ntlog("Host %s is not reachable at port %d." % (host, port))
+            if e != socket.timeout:
+                ntlog("Exception from socket: %s" % sys.exc_info()[0])
+            s.close()
+            s = None
+        sleep(interval)
+    if not hostup:
+        ntlog("Host %s is not reachable at port %d before %d seconds timeout" %  (host, port, timeout))
+    return hostup
+        
+def get_interface_ip(ifname="eth0"):
+    '''Get local Linux interface IP address'''
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    return socket.inet_ntoa(fcntl.ioctl(
+        s.fileno(),
+        0x8915, # SIOCGIFADDR
+        struct.pack('256s', ifname[:15])
+        )[20:24])
 
 class ExceptionPyNT(Exception) :
     ''' Raised for PyNT exceptions.
@@ -276,7 +381,7 @@ class NT(object):
         * **host** : An IP or hostname for the entity
         * *user* : default user is pynt, or ENV PYNT_USER.
         * *password* : default password is PyNT123 or ENV PYNT_PASSWORD
-        * *rootpw: default root password is PyNt!2# or ENV PYNT_ROOTPW
+        * *rootpw*: default root password is PyNt!2# or ENV PYNT_ROOTPW
         * *os* : operating system with default as junos
         * *timeout* : login timeout with default of 30 seconds
         * *cmd_timeout* : command timeout with default of 60 seconds
@@ -298,9 +403,9 @@ class NT(object):
     def __init__(self, host, **kargs):
         # instance variable
         self.host = host                    # required
-        self.user = kargs.pop('user', ini['USER'])     #SECURITY
-        self.passwd = kargs.pop('password', ini['PASSWORD']) # SECURITY
-        self.rootpw = kargs.pop('rootpw', ini['ROOTPW'])   # SECURITY
+        self.user = kargs.pop('user', ntini['USER'])     #SECURITY
+        self.passwd = kargs.pop('password', ntini['PASSWORD']) # SECURITY
+        self.rootpw = kargs.pop('rootpw', ntini['ROOTPW'])   # SECURITY
         self.os = kargs.pop('os', 'junos').lower()       # OS
         self.tag = kargs.pop('tag', "R")                 # alias like r1
         self.conn_proto = kargs.pop('conn_proto', 'ssh') # ssh/telnet
@@ -342,10 +447,20 @@ class NT(object):
             )
             if self.os == 'junos':
                 self.cmd("cli")
+                self.cmd("set cli screen-length 0")
                 self._old_mode = self._curr_mode
                 self._curr_mode = "cli"
         else :
             ntlog("the conn_proto is not supported\n")
+
+    def sendline(self, s):
+        return self.h.sendline(s)
+
+    def send(self, s):
+        return self.h.send(s)
+
+    def expect(self, pattern, timeout=-1, searchwindowsize=-1, async=False):
+        return self.h.expect(pattern, timeout, searchwindowsize, async)
 
     def set_xfer_proto(self, proto, ftp_port = 21, ftp_passive = True):
         ''' 
@@ -370,27 +485,9 @@ class NT(object):
         return self.tag
 
     def get_os(self) :
+        '''Return OS type of the object'''
         return self.os
 
-    def chk_hostup(self, port, interval=5, timeout=30, family=socket.AF_INET):
-        s = socket.socket(family, socket.SOCK_STREAM)
-        ts_start = time.time()
-        hostup = False
-        while time.time() - ts_start <= timeout:
-            try:
-                s.connect(self.host, port)
-                ntlog("Host %s is reachable at port %d" %(self.host, port))
-                hostup = True
-                break
-            except socket.error as e:
-                ntlog("Host %s is not reachable at port %d." % (self.host,
-                    port))
-            sleep(interval)
-        if not hostup:
-            ntlog("Host %s is not reachable before %d seconds timeout" % \
-                (self.host, timeout))
-        return hostup
-        
     def mode(self, mode, target=None):
         '''
         JUNOS devices have several different modes of operation
@@ -407,8 +504,9 @@ class NT(object):
             self._cmd_single("exit")
         # start to switch to new mode
         if mode == "cli":
+            self._cmd_single("set cli screen-length 0")
             pass
-        if mode == "config":
+        elif mode == "config":
             self._cmd_single("configure")
         elif mode == "shell":
             self._cmd_single("start shell")
@@ -421,6 +519,29 @@ class NT(object):
         self._old_mode = self._curr_mode
         self._curr_mode = mode
         return True
+
+    def su(self, rootpw=None):
+        '''enter su mode either with root password passed via API
+        if None passed, use default root password of the NT object'''
+        if rootpw is None:
+            if self.rootpw is not None:
+                rootpw = self.rootpw
+            else:
+                ntlog("Root password not set, aborting...", logging.ERROR)
+                return False
+        mode_curr = self._curr_mode
+        if mode_curr != "shell":
+            self.mode("shell")
+        self.sendline("su -")
+        self.expect("Password:")
+        self.sendline(rootpw)
+        index = self.expect(["su: Authentication failure", "su: Sorry", 
+            self.PROMPT, pexpect.EOF, pexpect.TIMEOUT])
+        if index == 0 or index == 1:
+            ntlog("Password error", logging.WARNING)
+            return False
+        if index == 2 or index == 3:
+            return True
 
     def mode_cli(self) :
         '''
@@ -447,10 +568,14 @@ class NT(object):
         '''
         return self.cmd(cmd, mode="cli", timeout=timeout)
 
-    def cmd(self, cmd, mode=None, timeout=CMD_TIMEOUT) :
+    def cmd(self, cmd, mode=None, xml="false", timeout=CMD_TIMEOUT, xmlns=False) :
         '''
         Execute a single command if a string is passed. If a list is provided
         via cmd arguments, it executes all commands one by one
+        xml supports the following
+        - xpath if mode is cli. Returns (list of) ElementTree.Element
+        - true if mode is cli. Returns (list of) xml in text
+        xmlns removes non-junos namespace if False, which is the default
         '''
         mode_restore = 0
         output = []
@@ -459,17 +584,16 @@ class NT(object):
             mode_restore = 1
         if type(cmd) is list:
             for onecmd in cmd:
-                output.append(self._cmd_single(onecmd, timeout))
+                output.append(self._cmd_single(onecmd, xml, timeout, xmlns))
         else:
-            output = self._cmd_single(cmd, timeout)
+            output = self._cmd_single(cmd, xml, timeout, xmlns)
         if mode_restore :
             self._mode_restore()
         return output
 
-    def _cmd_single(self, cmd, timeout=CMD_TIMEOUT):
-        if self.os == "junos" and self._curr_mode == "cli" \
-            and not cmd.endswith("no-more"):
-            cmd += " | no-more"
+    def _cmd_single(self, cmd, xml="false", timeout=CMD_TIMEOUT, xmlns=False):
+        if self.os == "junos" and self._curr_mode == "cli" and xml != "false":
+            cmd += " | display xml"
         try:
             self.h.sendline(cmd)
             prompt_pattern = [PROMPT, PROMPT_MORE]
@@ -483,11 +607,21 @@ class NT(object):
             ntlog("command failed with exception: %s" % sys.exc_info()[0],
                 level = logging.ERROR)
         # had to remvoe first and last line
-        return "\n".join(self.h.before.split("\n")[1:-1])
+        output = "\n".join(self.h.before.split("\r\n")[1:-1])
+        if xml == "xpath":
+            if xmlns is False:
+                # a hack to remove non junos namespace
+                output = re.sub(' xmlns="[^"]+"', '', output)
+            return ET.fromstring(output)
+        elif xml == "true":
+            return output
+        else:
+            return output
 
     def commit(self, sync=None, timeout=CMD_TIMEOUT):
         '''
         * *sync* 1 or 0, and overrides device.commitsync for this operation.
+
         user always has option to pass special argument.
         TODO: add support for commit full, commit and-quit and etc
         '''
@@ -502,7 +636,7 @@ class NT(object):
         exRaised = False
         pattern=[PROMPT, 'error']
         try:
-            self.h.sendline(cmd)
+            self.h.sendline(cmd) # + " and-quit")
             idx = self.h.expect(pattern, timeout = timeout)
             if idx == 1:
                 result = False
@@ -520,14 +654,15 @@ class NT(object):
         enter configuration mode, apply the configuration, and
         commit. Finally, it goes back to original mode'''
         result = True
+        mode_old = self._curr_mode
         result &= self.mode("config")
         for config in cfg.split("\n"):
             self._cmd_single(config)
         result &= self.commit()
-        result &= self._mode_restore()
+        result &= self.mode(mode_old)
         return result
 
-    def set_password(self, user, password=None):
+    def set_password(self, user, password=None, usrclass=None):
         '''
         For Junos devices, this sets a password in plain text for user
         '''
@@ -537,12 +672,14 @@ class NT(object):
         if user == "root":
             cfg = "root-"
         cfg = "set system " + cfg + "authentication plain-text-password"
+        if usrclass is not None and user != "root":
+            self.sendline("set system login user %s class %s" % (user, usrclass))
         result = True
         if password is None:
             if user == 'root':
-                password = ini['ROOTPW']
+                password = ntini['ROOTPW']
             else:
-                password = ini['PASSWORD']
+                password = ntini['PASSWORD']
         try:
             self.h.sendline(cfg)
             pattern = [PROMPT, 'error', 'password:']
@@ -619,6 +756,7 @@ class NT(object):
         return result
 
     def set_hostname(self, hostname):
+        '''Set hostname, support both Ubuntu and Junos'''
         cmd = ''
         if self.os == "linux":
             cmd += "echo '%s' | sudo tee /etc/hostname > /dev/null" % hostname
@@ -635,5 +773,366 @@ class NT(object):
                 "currently supported! Aborting...", logging.WARNING)
             return False
 
+    def chk_pic(self, fpc=0, pic=0, timeout=0, retries=1):
+        """check a single PIC at FPC/PIC slot number"""
+        cmd = "show chassis pic fpc-slot %d pic-slot %d" % (fpc, pic)
+        self.mode("cli")
+        attempt = 1
+        result = False
+        while(attempt <= retries and not result) :
+            sleep(timeout)
+            root=ET.fromstring(self.cmd(cmd=cmd, xml="True"))
+            if root.find(".//output") is not None:
+                ntlog("PIC is not ready yet " + root.find(".//output").text)
+            else:
+                state = root.find(".//pic-detail[slot='" + str(fpc) +
+                    "'][pic-slot='" + str(pic) + "']/state").text
+                ntlog("PIC state is " + state)
+                if state == "Online":
+                    result = True
+            attempt += 1
+
+        return result
+
+    def install_licenses(self, licenses):
+        '''Upload and install licenses for Junos devices
+        arguments licenses is a list of license file path'''
+        result = True
+        for lic in licenses:
+            src = lic
+            filename = src.split("/")[-1]
+            dst = "/var/tmp/" + filename
+            if self.upload(src, dst):
+                ntlog("License %s uploaded" % filename)
+            else:
+                ntlog("License %s upload failed" % filename, level=logging.ERROR)
+                result = False
+            output = self.cli("request system license add " + dst)
+            if re.search("no error", output, re.IGNORECASE):
+                ntlog("License %s applied" % filename)
+            else :
+                result = False
+                ntlog("License %s failed to apply" % filename)
+        return result
+
+    def set_snmp(self, comm_ro="public", comm_rw="private"):
+        cmd = "set snmp community " + comm_ro + " authorization read-only"
+        if comm_rw is not None:
+            cmd += "\nset snmp community " + comm_rw + " authorization read-write"
+        return self.config(cmd)
+
+    def get_snmp(self, mib, comm="public"):
+        '''Get a mib value, it takes either OID or MIB String'''
+        result = False
+        #try:
+        #    snmpapi = importlib.import_module(pysnmp.hlapi)
+        #except:
+        #    ntlog("failed to import pysnmp.hlapi". logging.ERROR)
+        #    return result
+        #m = re.search(r'(\.\d+)+', mib)
+        #if m:
+        #    obj = snmpapi.ObjectType(snmpapi.ObjectIdentity(mib))
+        #else:
+        #    obj = snmpapi.ObjectType(snmpapi.ObjectIdentity('SNMPv2-MIB', 
+        #        mib, 0))
+        #errorIndication, errorStatus, errorIndex, varBinds = snmppi.next(
+        #    snmpapi.getCmd(SnmpEngine(),
+        #           snmpapi.CommunityData(comm, mpModel=0),
+        #           snmpapi.UdpTransportTarget((self.host, 161)),
+        #           snmpapi.ContextData(),
+        #           snmpapi.ObjectType(obj))
+        #)
+        #if errorIndication:
+        #    ntlog(errorIndication)
+        #elif errorStatus:
+        #    ntlog('%s at %s' % (errorStatus.prettyPrint(),
+        #        errorIndex and varBinds[int(errorIndex) -1][0] or '?'),
+        #        logging.ERROR)
+        #else:
+        #    result = {}
+        #    for varBind in varBinds:
+        #        pp.pprint(varBind)
+        m = re.search(r'(\.\d+)+', mib)
+        if m:
+            obj = ObjectIdentity(mib)
+        else:
+            obj = ObjectIdentity('SNMPv2-MIB', mib, 0)
+        errorIndication, errorStatus, errorIndex, varBinds = next(
+            getCmd(SnmpEngine(),
+                CommunityData(comm, mpModel=0),
+                UdpTransportTarget((self.host, 161)),
+                ContextData(),
+                ObjectType(obj))
+            )
+        if errorIndication:
+            ntlog(errorIndication)
+        elif errorStatus:
+            ntlog('%s at %s' % (errorStatus.prettyPrint(),
+                errorIndex and varBinds[int(errorIndex) -1][0] or '?'),
+                logging.ERROR)
+        else:
+            result = {}
+            for varBind in varBinds:
+                result = [x.prettyPrint() for x in varBind]
+        return result[1]
+
+
+def get_event(evt_name):
+    events = {}
+    events['restartRpd'] = {
+        'desc':     "Restart RPD Once",
+        'cmds':     [
+            {0 :  [{'cmd': "restart routing", 'mode': "cli"},]}
+            ],
+        'check':    [
+            {
+                'rid':      0,
+                'desc':     "router ID",
+                'mode':     "cli",
+                'cmd':      "show route summary",
+                'xpath':    '//router-id',
+                'match':    'exact',
+            },
+            ],
+        'loss':     True,
+        'interval': 5,
+        'timeout':  300,
+    }
+    return events[evt_name]
+
+def _init_kpi():
+    kpis = {
+        'bgpEvpnRouteCount':    {
+            'tag'   :   "evpn",
+            'desc'  :   "BGP EVPN route count",
+            'mode'  :   "cli", #default
+            'cmd'   :   "show route summary table bgp.evpn.0",
+            'xpath' :   '//route-table[table-name="bgp.evpn.0"]/protocols/' + \
+                'active-route-count',
+            'match' :   'exact', # default, optional
+        },
+        'evpnMacTableCount':    {
+            'tag'   :   "evpn,mactable",
+            'desc'  :   "EVPN Mac Table Count",
+            'cmd'   :   "show evpn mac-table count",
+            'xpath' :   '//l2ald-rtb-learn-vlan-mac-count' + \
+                '/l2ald-rtb-learn-vlan-mac-count-entry/mac-count',
+        },
+        'ipsecSecurityAssociation': {
+            'tag'   :   "ipsec",
+            'desc'  :   'IPSec Security Association',
+            'cmd'   :   "show services ipsec-vpn ipsec security-associations",
+            'xpath' :   "//sa-tunnel-information",
+        },
+        'routerId': {
+            'tag'   :   'test',
+            'desc'  :   'Test to retrieve a single value',
+            'cmd'   :   "show route summary",
+            'xpath' :   "//router-id",
+        }
+    }
+    return kpis
+
+def get_kpi_def(tag=[], name=[]):
+    '''tag can be used to retrieve a collection of KPIs in same category,
+    or if a list of KPI names can be used.
+    return a dictionary of KPIs'''
+    KPI = _init_kpi()
+    if len(tag) == 0 and len(name) == 0:
+        ntlog("either tag or name has to be provided", logging.ERROR)
+    kpis = {}
+    for kpi in name:
+        if kpi not in KPI:
+            ntlog("KPI %s does not exist, skipping...", logging.WARNING)
+            continue
+        kpis[kpi] = KPI[kpi]
+    if len(tag) == 0:
+        return kpis
+    for kpi in KPI:
+        tags = KPI[kpi].tag.split(",")
+        if len(set(tag).intersection(tags)) > 0:
+            kpis[kpi] = KPI[kpi]
+    return kpis
+
+def def_kpi_set(names=None):
+    '''This is user defined routine to associate set of kpis to each device
+    it needs more work to be flexible when not only DUT needs to be monitored
+    Returns a list, with element 0 is a list of kpis for r0
+    '''
+    kpi_names = ['ipsecSecurityAssociation']
+    return [get_kpi(name=kpi_names)]
+
+def get_kpi_single(rh, kpi):
+    '''expect the actual KPI definition being passed, without the KPI Key'''
+    results = []
+    if 'cmd' not in kpi:
+        kpi_single = {}
+        for key in kpi:
+            kpi_single = kpi[key]
+            break
+        kpi = kpi_single
+    if "mode" not in kpi or kpi['mode'] == "cli":
+        if "regexp" in kpi:
+            reg = []
+            if type(kpi['regexp']) is list:
+                reg = kpi['regexp']
+            else:
+                reg = [kpi['regexp']]
+            resp = rh.cli(kpi['cmd'])
+            for regex in reg:
+                m = re.search(regex, resp)
+                if m:
+                    results.append(m.group(0))
+                else:
+                    ntlog("cli match: regexp %s failed to match response\n%s" \
+                        % (regex, resp), logging.WARNING)
+        if 'xpath' in kpi:
+            xps = []
+            if type(kpi['xpath']) is list:
+                xps = kpi['xpath']
+            else:
+                xps = [kpi['xpath']]
+            resp = rh.cmd(cmd=kpi['cmd'], mode='cli', xml='xpath')
+            for xpath in xps:
+                if xpath.startswith('//'):
+                    xpath = "." + xpath
+                leaf = resp.find(xpath)
+                if leaf is not None:
+                    results.append(leaf.text)
+    else:
+        ntlog("only cli command supported for this release", logging.WARNING)
+    return results
+
+def get_kpi_snapshot(rh, kpi_set):
+    '''Get snapshot with kip_set and router handles'''
+    kpi_ss = {} # kpi snapshot for this device
+    for rid in kpi_set:
+        kpi_ss[rid] = {} 
+        for kpi_key in kpi_set[rid]:
+            kpi_ss[rid][kpi_key] = get_kpi_single(rh[rid], 
+                get_kpi_def(name=kpi_key))
+    return kpi_ss
+
+def compare_kpi_single(base, curr, kpi):
+    key, k = kpi.items()[0]
+    match = 'exact'
+    percent = 1
+    if 'match' in k or k['match'] == 'exact' :
+        match = 'exact'
+    elif k['match'] == 'percent':
+        match = 'percent'
+        if 'percent' in k:
+            percent = k['percent']
+    else:
+        ntlog("match tpe %s not supported, default to exact" % k['match'],
+            logging.WARNING)
+    result = True
+    for idx in range(len(base)):
+        if match == 'exact':
+            result &= base[idx] == curr[idx]
+        elif match == 'percent':
+            diff = abs(base[idx] - curr[idx])
+            result &= (diff < 5) or (diff*1.0/base[idx]) < (percent / 100.0)
+    return result 
+
+def compare_kpi(base, curr, kpi):
+    result = True
+    for rid in base:
+        for kpi_key in base[rid]:
+            kbase = base[rid][kpi_key]
+            kcurr = curr[rid][kpi_key]
+            kpi_single = get_kpi_def(name=[kpi_key])
+            result &= compare_kpi_single(base, curr, kpi_single)
+    return rsult
+
+
+def evt_precheck(event, devices):
+    """Precheck testbed in steady state
+    return a dictionary, where
+
+        - status: True or False
+        - baseline: dictionary of stats captured for comparison
+
+    """
+    if "mtd_steady" in event and hasattr(event['mtd_steady'], '__call__'):
+        result = event['mtd_steady'](event, devices)
+    else:
+        result = get_baseline(event, devices)
+    return result
+
+def chk_event(self, event, devices, params=None):
+    """event is a dictionary for the desirable event based on 
+        a set of predefined event templates
+    devices are handles of devices, it has 
+        devices['r']: a list of router instances
+        devices['h']: a list of host instances
+        devices['t']: a list of tester instances
+
+    event has the following key/value pairs
+    
+        name: a short name for the event, also the key to predefined
+        events
+
+        dut: integer. index for router
+
+        mtd_steady : a method to bringup steady state before, during
+        and/or after the event. In case of traffic forwarding, make
+        sure zero loss during stead state, then starts traffic and
+        begin event. After event converges, stop traffic and measure
+        traffic loss as a result of the event. For some events, zero
+        loss is expected throughput the event. For others, some traffic
+        loss is expected, then make sure the loss is within expectation
+        And finally, restart traffic measurement again and ensure
+        the steady state can be reached with 0 traffic loss.
+
+        template: a dictionary that defines a custom event if not already
+        present in library, or any custom update required
+
+    params is optional for misellaneous environment
+    
+    the event is declared success if impact is within the expected range,
+        and steady state is reached after the event. Not used now
+    """
+    if 'template' in event:
+        evt = event['template']
+    else:
+        evt = get_event(name=event['name'])
+    r_before = evt_precheck(evt, devices)
+    if r_before['status'] is False :
+        ntlog("Baseline precheck failed, abort...")
+        return False
+    r_event = evt_start(evt, devices)
+    r_after = evt_postcheck(evt, devices)
+    return evt_cmp_results(evt, result=[r_before, r_event, r_after])
+
+class Receiver(threading.Thread):
+    '''Simple TCP/UDP server as a receiver for network traffic'''
+    def __init__(self, ip, port, sock, regex=None, to=900, q=None):
+        if sock != socket.SOCK_DGRAM:
+            ntlog("Only UDP supported for now...", logging.ERROR)
+            return None
+        threading.Thread.__init__(self)
+        self.r = socket.socket(socket.AF_INET, sock)
+        self.match = False
+        self.regex = regex
+        self.to = to
+        self.q = q
+        self.r.bind((ip, port))
+
+    def run(self):
+        '''start the receiver'''
+        data = ''
+        ts = time.time()
+        timeout = False
+        match = False
+        while not match and not timeout:
+            data, addr = self.r.recvfrom(4096)
+            match = re.search(self.regex, data)
+            if match:
+                self.match = True
+                self.q.put(data)
+                #ntlog("log received: %s" % data)
+            timeout = time.time() - ts > self.to
+        
 if __name__ == "__main__" :
     pass
