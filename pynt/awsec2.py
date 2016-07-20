@@ -818,7 +818,66 @@ class Ec2Vpc(object):
         self.vpc.delete()
         return status
 
-    def get_throughput(self, host1, host2, key, gw_offset=[0, 0], ifidx=[1, 2]):
+    def get_throughput(self, host1, host2, key, gw_offset=[0, 0], 
+        ifidx=[1, 2], mss=1448):
+        '''
+        Run the iperf3 throughput test. TCP only for now
+        gw_offset refers to vmx gw address offset from low addr 
+        ifidx refers to lnx host interface id
+        '''
+        pub_add = []
+        pvt0_add = []
+        pvt_add = []
+        pvt_gw = []
+        hosts = [host1, host2]
+        vmx=[]
+        host_type = []
+        for idx in range(2):
+            inst = self.ec2instances[hosts[idx]]
+            host_type.append(inst.instance.instance_type)
+            ifid = ifidx[idx]
+            if inst.instance.public_ip_address is not None:
+                pub_add.append(inst.instance.public_ip_address)
+            else:
+                pub_add.append(inst.instance.private_ip_address)
+            pvt0_add.append(inst.instance.private_ip_address)
+            inst.cfg_eth(key, ifid)
+            pvt_add.append(inst.pips[ifid])
+            gw = ip_add(strip_mask(inst.enis[ifid].subnet.cidr_block),
+                 self.addr_low + gw_offset[idx])
+            pvt_gw.append(gw)
+            # needs to be moved to VmxAws
+            vmx_name = "vmx%02d" % gw_offset[idx]
+            vmx.append(VmxAws.Vmx(self.ec2instances[vmx_name]))
+        iperf = IPerf(server=pub_add[0], client=pub_add[1], user="ubuntu",
+           key=key)
+        iperf.connect()
+        iperf.start_server()
+        #iperf.get_bandwidth(udp=True)
+        results = []
+        # needs to be moved to VmxAws
+        for grp in ["no_vmx", "direct", "ipsec"]:
+            ntlog("Testing Throughput with %s connection" % grp)
+            if grp == "no_vmx":
+                iperf.config(saddr=pvt0_add[0], caddr=pvt0_add[1])
+            else :
+                cfg = "delete apply-groups direct\n"
+                cfg += "delete apply-groups ipsec\n"
+                cfg += "set apply-groups " + grp
+                for v in vmx:
+                    v.config(cfg)
+                iperf.config(saddr=pvt_add[0], caddr=pvt_add[1], 
+                    sgateway=pvt_gw[0], cgateway=pvt_gw[1])
+            result = iperf.get_bandwidth()
+            for record in result:
+                record['dut_type'] = grp
+                record['host_type'] = host_type[0]
+                record['vmx_type'] = vmx[0].inst_type
+                results.append(record)
+        return results
+
+    def get_thruput(self, host1, host2, key, gw_offset=[0, 0], 
+        ifidx=[1, 2], mss=1448):
         '''
         Run the iperf3 throughput test. TCP only for now
         gw_offset refers to vmx gw address offset from low addr 
@@ -1065,7 +1124,7 @@ class IPerf:
         suser = None, spassword = None, skey=None,
         cuser = None, cpassword = None, ckey=None,
         udp=False, sport=80, cport=None, duration=30, interval=None,
-        soption=None, coption=None):
+        soption=None, coption=None, mss=1448):
         if type(server) is NT :
             self.hs = server
         else:
@@ -1084,6 +1143,7 @@ class IPerf:
             self.interval = duration
         self.soption = soption
         self.coption = coption
+        self.mss = mss
         self.daemon = True
         if suser is None :
             self.suser = user
@@ -1121,7 +1181,7 @@ class IPerf:
 
 
     def config(self, saddr, caddr, sport=None, udp=None,
-        sgateway=None, cgateway=None, mask=VPC_SUBNET_MASK):
+        sgateway=None, cgateway=None, mask=VPC_SUBNET_MASK, duration=None):
         '''Configure route table and specify iperf params'''
         smask = mask
         if "/" in saddr:
@@ -1151,6 +1211,8 @@ class IPerf:
             self.hc.cmd("sudo route add -host " + saddr + " gw " + cgateway)
         #return (caddr in self.hs.cmd("route -n")) and \
         #    (saddr in self.hc.cmd("route -n"))
+        if duration is not None:
+            self.duration = duration
 
     def start_server(self, daemon = True):
         '''Start server in daemon mode or not'''
@@ -1164,7 +1226,10 @@ class IPerf:
     def summary(self, result):
         pass
 
-    def get_bandwidth(self, duration = None, udp=None, enable_json=True):
+    def get_bandwidth(self, duration = None, udp=None, enable_json=True,
+        mss=None):
+        if mss is None:
+            mss = self.mss
         '''Get the bandwidth using Iperf3'''
         if duration is None:
             duration = self.duration
@@ -1204,7 +1269,7 @@ class IPerf:
                     'loss_pct':     'end.sum.lost_percent',
                 }
             else :
-                cmd += " -V"
+                cmd += " -V -M %d" % mss
                 re_pattern = "Summary Results:.+" + \
                     "sec\s+(\d+)\s+(\S+)\s+(\d+)\s+(\S+)\s+(\d+)\s+sender" + \
                     ".+sec\s+(\d+)\s+(\S+)\s+(\d+)\s+(\S+)\s+receiver"
@@ -1214,7 +1279,7 @@ class IPerf:
                 jfields = {
                     'timestamp':    'start.timestamp.timesecs',
                     'protocol':     'start.test_start.protocol',
-                    'size':         'start.tcp_mss_default',
+                    'size':         'start.tcp_mss',
                     'local_host':   'start.connected.0.local_host',
                     'remote_host':  'start.connected.0.remote_host',
                     'duration':     'start.test_start.duration',

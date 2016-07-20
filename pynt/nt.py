@@ -9,6 +9,7 @@ Environment Variables Supported and their Default Values
        * PYNT_ROOTPW:       PyNt!2#
        * PYNT_SSH_KEY:      ~/.ssh/id_rsa
        * PYNT_LOGFILE:      nt.log
+       * PYNT_VMX_LIC:      ''
        * PYNT_AWS_KEYFILE:  ''
        * PYNT_AWS_KEYNAME:  ''
        * PYNT_AWS_AMI_VMX:  ami-2cbec54c # Mar 27, 2016
@@ -66,6 +67,7 @@ def _get_env():
         'ROOTPW':       'PyNt!2#',
         'SSH_KEY':      '~/.ssh/id_rsa',
         'LOGFILE':      'nt.log',
+        'VMX_LIC':      None,
         'AWS_KEYFILE':  '',
         'AWS_KEYNAME':  '',
         'AWS_AMI_VMX':  'ami-2cbec54c', # Mar 27, 2016
@@ -649,17 +651,19 @@ class NT(object):
         self._mode_restore()
         return result
 
-    def config(self, cfg):
+    def config(self, cfg, commit=True):
         '''Take single line or multiline set config statements
         enter configuration mode, apply the configuration, and
-        commit. Finally, it goes back to original mode'''
+        commit. Finally, it goes back to original mode. If commit
+        is False, it skips commit and stay in config mode'''
         result = True
         mode_old = self._curr_mode
         result &= self.mode("config")
         for config in cfg.split("\n"):
             self._cmd_single(config)
-        result &= self.commit()
-        result &= self.mode(mode_old)
+        if commit:
+            result &= self.commit()
+            result &= self.mode(mode_old)
         return result
 
     def set_password(self, user, password=None, usrclass=None):
@@ -675,6 +679,7 @@ class NT(object):
         if usrclass is not None and user != "root":
             self.sendline("set system login user %s class %s" % (user, usrclass))
         result = True
+        timeout = 10
         if password is None:
             if user == 'root':
                 password = ntini['ROOTPW']
@@ -682,20 +687,28 @@ class NT(object):
                 password = ntini['PASSWORD']
         try:
             self.h.sendline(cfg)
-            pattern = [PROMPT, 'error', 'password:']
+            pattern = [PROMPT, pexpect.EOF, 'error', 'password:', pexpect.TIMEOUT]
             while True :
-                idx = self.h.expect(pattern, timeout=self.timeout)
-                if idx == 0:
-                    break
-                elif idx == 1:
-                    result = False
+                idx = self.h.expect(pattern, timeout=timeout)
+                if idx == 0 or idx == 1:
                     break
                 elif idx == 2:
+                    result = False
+                    break
+                elif idx == 3:
                     self.h.sendline(password)
+                elif idx == 4:
+                    ntlog(str(self.h))
+                    if re.search('password:', self.h.before):
+                        self.h.sendline(password)
+                    else:
+                        result = False
+                        break
             result &= self.commit()
         except:
             result = False
         if not result :
+            ntlog(str(self.h))
             ntlog("Password config failed with %s" % sys.exc_info()[0], level=logging.ERROR)
         self.mode(mode)
         return result

@@ -177,14 +177,23 @@ class VmxAws(object):
             (pvt_ip, pub_ip))
 
     def start_instance(self, inst_name):
-        self.evpc.ec2instances[inst_name].start()
+        if type(inst_name) is not list:
+            inst_name = [inst_name]
+        for iname in inst_name:
+            self.evpc.ec2instances[iname].start()
         
     def stop_instance(self, inst_name):
-        self.evpc.ec2instances[inst_name].stop()
+        if type(inst_name) is not list:
+            inst_name = [inst_name]
+        for iname in inst_name:
+            self.evpc.ec2instances[iname].stop()
         
     def terminate_instance(self, inst_name):
         '''Terminate instance'''
-        self.evpc.ec2instances[inst_name].terminate()
+        if type(inst_name) is not list:
+            inst_name = [inst_name]
+        for iname in inst_name:
+            self.evpc.ec2instances[iname].terminate()
 
 
     def install_iperf3(self, inst_name, key=ec2_key_file):
@@ -195,6 +204,129 @@ class VmxAws(object):
 
     def throughput_with_iperf3(self, host1, host2, gw=[0, 0], ifidx=[1, 2]):
         self.evpc.get_throughput(host1, host2, ec2_key_file, gw, ifidx)
+
+    def perf_report(self, host1, host2, key=ec2_key_file,
+        gw_offset=[0, 0], ifidx=[1, 2]):
+        '''
+        Taking existing topology and report iperf3 thruput
+
+            host1 <-> vmx1 <-> vmx2 <-> host2
+                       <- IPSEC ->
+
+        By varying the following
+            
+            * Direct - apply-groups direct. without IPSec
+            * IPSec Tunnel - apply-groups ipsec with enc/auth combo
+                * 3des-cbc          hmac-sha1-96
+                * aes-256-cbc       hmac-sha1-96
+                * aes-128-cbc       hmac-sha1-96
+                * aes-256-gcm       None
+                * aes-128-gcm       None
+        
+        For each of 6 combinations above, change TCP MSS as follows
+            
+            * 1448 : max/default MSS assuming 52 bytes IPSec overhead
+            * 1408 : 1408 + 40 IP/TCP HDR + 52 IPSec HDR = 1500
+            * 1300 : 
+            * 1000 :
+            *  500 :
+            *  128 : Expect low throughput, but high pps relatively
+
+        TODO:
+            UDP performance number
+            PPS reading from VMX since iperf3 doesn't report this
+        '''
+        results = [] # list of dict w/ enc, auth, mss, bps
+        ipsec = [
+            ['3des-cbc',        'hmac-sha1-96'],
+            ['aes-256-cbc',     'hmac-sha1-96'],
+            ['aes-256-gcm',     None],
+            ['aes-128-cbc',     'hmac-sha1-96'],
+            ['aes-128-gcm',     None],
+            ]
+        mss = [1448, 1400, 1300, 1000, 500, 128]
+        # mss = [1448, 1408, 1300, 1000, 500, 128]
+        pub_add = []
+        pvt0_add = []
+        pvt_add = []
+        pvt_gw = []
+        hosts = [host1, host2]
+        vmx=[]
+        host_type = []
+        for idx in range(2):
+            inst = self.evpc.ec2instances[hosts[idx]]
+            host_type.append(inst.instance.instance_type)
+            ifid = ifidx[idx]
+            if inst.instance.public_ip_address is not None:
+                pub_add.append(inst.instance.public_ip_address)
+            else:
+                pub_add.append(inst.instance.private_ip_address)
+            pvt0_add.append(inst.instance.private_ip_address)
+            inst.cfg_eth(key, ifid)
+            pvt_add.append(inst.pips[ifid])
+            gw = ip_add(strip_mask(inst.enis[ifid].subnet.cidr_block),
+                 AWS_ADDR_LOW + gw_offset[idx])
+            pvt_gw.append(gw)
+            vmx_name = "vmx%02d" % gw_offset[idx]
+            vmx.append(Vmx(self.evpc.ec2instances[vmx_name]))
+        iperf = awsec2.IPerf(server=pub_add[0], client=pub_add[1], 
+                user="ubuntu", key=key)
+        iperf.connect()
+        iperf.start_server()
+        #iperf.get_bandwidth(udp=True)
+        results = []
+        for grp in ["no_vmx", "direct"]:
+            ntlog("Testing Throughput with %s connection" % grp)
+            if grp == "no_vmx":
+                iperf.config(saddr=pvt0_add[0], caddr=pvt0_add[1], duration=10)
+            else :
+                cfg = "delete apply-groups direct\n"
+                cfg += "delete apply-groups ipsec\n"
+                cfg += "set apply-groups " + grp
+                for v in vmx:
+                    v.config(cfg)
+                iperf.config(saddr=pvt_add[0], caddr=pvt_add[1],
+                    sgateway=pvt_gw[0], cgateway=pvt_gw[1])
+            for tcp_mss in mss:
+                result = iperf.get_bandwidth(mss=tcp_mss)
+                for record in result:
+                    record['dut_type'] = grp
+                    record['enc_alg'] = grp
+                    record['auth_alg'] = 'noauth'
+                    record['host_type'] = host_type[0]
+                    record['vmx_type'] = vmx[0].inst_type
+                    results.append(record)
+        # ipsec here)
+        for v in vmx:
+            cfg = "delete apply-groups direct\n"
+            cfg += "set apply-groups ipsec\n"
+            v.config(cfg, commit=False)
+
+        for enc, authen in ipsec:
+            cfg_path = "groups ipsec services ipsec-vpn ipsec proposal" + \
+                " ipsec_proposal_1 "
+            cfg = "set " + cfg_path + "encryption-algorithm " + enc + "\n"
+            if authen is None:
+                cfg += "delete " + cfg_path + " authentication-algorithm\n"
+            else:
+                cfg += "set " + cfg_path + " authentication-algorithm " + \
+                    authen + "\n"
+            for v in vmx:
+                v.config(cfg)
+                v.cli("clear services ipsec-vpn ipsec security-associations")
+            for tcp_mss in mss:
+                result = iperf.get_bandwidth(mss=tcp_mss)
+                for rec in result:
+                    rec['dut_type'] = 'ipsec'
+                    rec['enc_alg'] = enc
+                    rec['auth_alg'] = authen
+                    rec['host_type'] = host_type[0]
+                    rec['vmx_type'] = vmx[0].inst_type
+                    results.append(rec)
+        ntlog(pp.pprint(results))
+        return results
+
+
 
     def setup_vmx(self, ami, inst_name="vmx01", enis=[],
         inst_type=vmx_inst_type, key_name=ec2_key_name, 
@@ -254,13 +386,20 @@ class VmxAws(object):
         ntlog("SRIOV Net Support for instance %s is %s" % (inst_name, status))
 
     def enable_sriov(self, inst_name):
-        inst = self.evpc.ec2instances[inst_name]
-        inst.enable_sriov()
+        if type(inst_name) is not list:
+            inst_name = [inst_name]
+        for iname in inst_name:
+            inst = self.evpc.ec2instances[iname]
+            inst.enable_sriov()
 
     def cfg_lnx_hosts(self, instances):
-        for inst in instances:
+        for instance in instances:
+            inst = str(instance)
             self.install_iperf3(inst)
             self.install_ixgbevf(inst)
+            self.stop_instance(inst)
+            self.enable_sriov(inst)
+            self.start_instance(inst)
 
     def vmx_install_license(self, inst_name, licenses=None):
         vmx = Vmx(self.evpc.ec2instances[inst_name])
@@ -312,7 +451,7 @@ class VmxAws(object):
         itype_lnx = "c4.8xlarge"
         ifcount = 5
         lnx_instances = []
-        for idx in [1, 2]:
+        for idx in [23, 24]:
             inst_param = {
                 'iname':    "lnx%02d" % (idx),
                 'itype':    itype_lnx,
@@ -323,20 +462,23 @@ class VmxAws(object):
             lnx_instances.append(inst_param)
         self.launch_instances(inst_params = lnx_instances, ami=ami_ubuntu)
 
-    def launch_ipsec_instances(self, inst_params):    
-        vmx_instances = [
-            #{"seq": [3, 4], "itype": "m4.xlarge"},
-            #{"seq": [5, 6], "itype": "m4.2xlarge"},
-            #{"seq": [7, 8], "itype": "m4.4xlarge"},
+    def launch_ipsec_instances(self, inst_params=None, ipsecvmx=[0]):
+        inst_pairs = [
+            {"seq": [3, 4], "itype": "m4.xlarge"},
+            {"seq": [5, 6], "itype": "m4.2xlarge"},
+            {"seq": [7, 8], "itype": "m4.4xlarge"},
             {"seq": [9, 10], "itype": "m4.10xlarge"},
-            #{"seq": [11, 12], "itype": "c3.2xlarge"},
-            #{"seq": [13, 14], "itype": "c3.4xlarge"},
-            #{"seq": [15, 16], "itype": "c3.8xlarge"},
-            #{"seq": [17, 18], "itype": "c4.2xlarge"},
-            #{"seq": [19, 20], "itype": "c4.4xlarge"},
-            #{"seq": [21, 22], "itype": "c4.8xlarge"},
-            #{"seq": [25], "itype": "c4.8xlarge", "if_cnt": 8},
+            {"seq": [11, 12], "itype": "c3.2xlarge"},
+            {"seq": [13, 14], "itype": "c3.4xlarge"},
+            {"seq": [15, 16], "itype": "c3.8xlarge"},
+            {"seq": [17, 18], "itype": "c4.2xlarge"},
+            {"seq": [19, 20], "itype": "c4.4xlarge"},
+            {"seq": [21, 22], "itype": "c4.8xlarge"},
+            {"seq": [25], "itype": "c4.8xlarge", "if_cnt": 8},
             ]
+        vmx_instances = []
+        for vmxid in ipsecvmx:
+            vmx_instances.append(inst_pairs[vmxid])
         for vmx_inst in vmx_instances:
             inst_params = []
             for seqid in range(len(vmx_inst['seq'])): # only 1 or 2
@@ -464,6 +606,7 @@ set groups ipsec services ipsec-vpn ike proposal ike_proposal_1 dh-group group1
 set groups ipsec services ipsec-vpn ike policy ike_policy_1 version 2
 set groups ipsec services ipsec-vpn ike policy ike_policy_1 proposals ike_proposal_1
 set groups ipsec services ipsec-vpn ike policy ike_policy_1 pre-shared-key ascii-text "$9$PTF/uORlK8CtK8X7sYfTz3Ct0BIcre"
+set groups ipsec services ipsec-vpn establish-tunnels immediately
 set groups ipsec interfaces si-0/0/0 unit 0 family inet
 set groups ipsec interfaces si-0/0/0 unit 0 family inet6
 set groups ipsec interfaces si-0/0/0 unit 1 family inet
@@ -676,7 +819,9 @@ def main():
         opts, args = getopt.getopt(sys.argv[1:], 
             "hi:o:v:", ["help", "instance=", "vpc=", "oper=", "instance-type=",
             "vmx-license=", "ami-vmx=", "inst-params=", "rootpw=", 
-            "gw-offset=", "vpcs=", "subnet-cnt=", "instances="])
+            "gw-offset=", "vpcs=", "subnet-cnt=", "instances=",
+            "ipsecvmx=",
+            ])
     except getopt.GetoptError as err:
         print str(err)
         usage()
@@ -688,6 +833,7 @@ def main():
     inst_params = []
     gw_offset = [0, 0]
     instances = []
+    ipsec_vmx = []
     for opt, arg in opts:
         if opt == '-h':
             usage()
@@ -710,6 +856,8 @@ def main():
             inst_params.append(arg)
         elif opt in ("--gw-offset"):
             gw_offset = map(int, arg.split(":"))
+        elif opt in ("--ipsecvmx"):
+            ipsecvmx=map(int, arg.split(":"))
         elif opt in ("--vpcs"):
             vpcs = arg.split(":")
         elif opt in ("--subnet-cnt"):
@@ -726,7 +874,7 @@ def main():
     if oper == "vpc_init":
         vmxaws.vpc_init()
     elif oper == "terminate":
-        vmxaws.terminate_instance(inst_name)
+        vmxaws.terminate_instance(instances)
     elif oper == "cleanup":
         vmxaws.vpc_cleanup()
     elif oper == "setup-all":
@@ -742,13 +890,13 @@ def main():
     elif oper == "get-console-output":
         vmxaws.get_console_output(inst_name)
     elif oper == "start-instance":
-        vmxaws.start_instance(inst_name)
+        vmxaws.start_instance(instances)
     elif oper == "stop-instance":
-        vmxaws.stop_instance(inst_name)
+        vmxaws.stop_instance(instances)
     elif oper == "chk-sriov":
         vmxaws.chk_sriov(inst_name)
     elif oper == "enable-sriov":
-        vmxaws.enable_sriov(inst_name)
+        vmxaws.enable_sriov(instances)
     elif oper == "launch-vmx":
         vmxaws.setup_vmx(inst_name=inst_name, inst_type=inst_type, ami=ami_vmx)
     elif oper == "launch-vmxes":
@@ -756,7 +904,7 @@ def main():
     elif oper == "vmx-install-license":
         vmxaws.vmx_install_license(inst_name=inst_name, licenses=license)
     elif oper == "launch-ipsec-instances":
-        vmxaws.launch_ipsec_instances(inst_params)
+        vmxaws.launch_ipsec_instances(inst_params, ipsecvmx=ipsecvmx)
     elif oper == "vmx-basic-setup":
         vmxaws.vmx_basic_setup(names=instances, rootpw=rootpw)
     elif oper == "vfp-http-enable":
