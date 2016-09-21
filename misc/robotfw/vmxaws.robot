@@ -1,49 +1,56 @@
 *** Settings ***
-Library	../../pynt/VmxAws.py	vpc=xwuw01	cidr=192.168.128.0/17	subnet_mask=24	subnet_cnt=6
+Library	../../pynt/VmxAws.py	vpc=xwuw01	cidr=192.168.128.0/17	subnet_mask=24	subnet_cnt=4
 
 *** Variables ***
 ${vpc_name}	xwuw01
+${mgmt_vpc_name}	mgmt01
 ${key_file}	~/.ssh/id_rsa
-${ami_vmx}	ami-8f6420ef
+${ami_vmx}	ami-e2eba982 # 15.1F6-S1.4-9
 ${ami_lnx}	ami-06116566
-${inst_type_vmx}	c4.2xlarge
-${inst_type_lnx}	c4.2xlarge
-${intf_per_subnet}	${30}
+${inst_type_vmx}	m4.xlarge
+${inst_type_lnx}	m4.xlarge
+${intf_per_subnet}	${25}
 ${vmx_if_cnt}	${3}
-${vmx_subnet_cnt}	${5}
+${vmx_subnet_cnt}	${4}
 ${key_name}	xwu_pub_cloud
 ${lic}	E418396532.lic:Lic20G.txt
 
 *** Test Cases ***
-#VPC Cleanup
-#	[Documentation]	Remove VPC ${vpc_name} and its related resouces
-#	[Tags]	VPC
-#	Vpc Cleanup
+VPC Cleanup
+	[Documentation]	Remove VPC ${vpc_name} and its related resouces
+	[Tags]	VPC
+	Vpc Cleanup
 
-#Create Subnets
-#	[Documentation]	Create Subnets
-#	[Tags]	VPC
-#	Vpc Create Subnet	${vmx_subnet_cnt}
-#
-#Create Security Groups
-#	[Documentation]	Two security groups to allow external from JNPR and Internal VPC
-#	[Tags]	VPC
-#	Vpc Create Security Groups
-#
-#Create Elastic Network Interfaces ENIs
-#	[Documentation]	Create ${intf_per_subnet} ENIs per Subnet with predefined static Private IPs
-#	[Tags]	VPC
-#	Vpc Create Interface	${intf_per_subnet}
-#
-#Create Internet Gateway
-#	[Documentation]	Create Internet Gateway and attach to VPC
-#	[Tags]	VPC
-#	Vpc Create Internet Gateway
-#
-#Create Route Tables
-#	[Documentation]	Create route tables for the VPC if needed, the number includes the main route table that is auto generated during VPC creation
-#	[Tags]	VPC
-#	Vpc Create Route Table	${3}
+Create Subnets
+	[Documentation]	Create Subnets
+	[Tags]	VPC
+	Vpc Create Subnet	${vmx_subnet_cnt}
+
+Create Security Groups
+	[Documentation]	Two security groups to allow external from JNPR and Internal VPC
+	[Tags]	VPC
+	Vpc Create Security Groups
+
+Create Elastic Network Interfaces ENIs
+	[Documentation]	Create ${intf_per_subnet} ENIs per Subnet with predefined static Private IPs
+	[Tags]	VPC
+	Vpc Create Interface	${intf_per_subnet}
+
+Create Internet Gateway
+	[Documentation]	Create Internet Gateway and attach to VPC
+	[Tags]	VPC
+	Vpc Create Internet Gateway
+
+Create Route Tables
+	[Documentation]	Create route tables for the VPC if needed, the number includes the main route table that is auto generated during VPC creation
+	[Tags]	VPC
+	Vpc Create Route Table	${3}
+
+Create VPC Peering
+	[Documentation]	Setup VPC peering between mgmt VPC to VMX VPC so that the provision host can reach VMX via private IP. This greatly reduces the number of Elastic Public IP addresses required.
+	[Tags]	VPC
+	@{vpcs}	Create List	${vpc_name}	${mgmt_vpc_name}
+	Set VPC Peering	vpcs=@{vpcs}
 
 #Launch VMX Instances
 #	[Documentation]	Create VMX instance with ${vmx_if_cnt} interfaces
@@ -60,7 +67,7 @@ ${lic}	E418396532.lic:Lic20G.txt
 Launch IPSec VMX
 	[Documentation]	Create a pair of VMX instances for performance testing
 	[Tags]	VMX
-	@{ipsecvmx}	Create List	${7}
+	@{ipsecvmx}	Create List	${0}
 	Launch IPSec Instances	ipsecvmx=@{ipsecvmx}
 
 #Associate Public IP Address to Instance Private IP
@@ -87,6 +94,8 @@ Launch Endpoint EC2 Ubuntu Hosts
 	Launch Instances	inst_params=@{params}	ami=${ami_lnx}	key_name=${key_name}	inst_type=${inst_type_lnx}
 	EIP Associate	${3}	192.168.128.5
 	EIP Associate	${4}	192.168.128.6
+	Chk Reachability	host=192.168.128.5	port=${22}	timeout=${450}	interval=${15}	prompt=SSH
+	Chk Reachability	host=192.168.128.6	port=${22}	timeout=${45}	interval=${5}	prompt=SSH
 
 #Stop VMX Instance
 #	[Documentation]	Stop VMX and measure hybernate time
@@ -104,30 +113,27 @@ Launch Endpoint EC2 Ubuntu Hosts
 #	\	Terminate Instance	${inst_name}
 
 Setup Linux hosts
-	[Documentation]	Install necessary packages and iperf3 from github
+	[Documentation]	Install necessary packages and iperf3 from github. It also stops instance, enables SRIOV, and starts instance again.
 	[Tags]	Performance
-	@{inst_names}	Create List	xwu-lnx23	xwu-lnx24
+	@{inst_names}	Create List	xwu-lnx01	xwu-lnx02
 	#: For	${inst_name}	in	@{inst_names}
 	#\	Cfg Lnx Hosts	${inst_name}
+	Sleep	2 minutes	Waiting for Linux to boot fully
 	Cfg Lnx Hosts	instances=@{inst_names}
+
+Wait for VMX to Come Up Online
+	[Documentation]	It might take up to 30 min for a new instance to come up. This is to ensure proper initliazation before proceeding with rest of testing.
+	[Tags]	Setup
+	${timeout}=	Set Variable	${1800}
+	${interval}=	Set Variable	${30}
+	Chk Reachability	host=192.168.128.7	port=${22}	timeout=${timeout}	interval=${interval}	prompt=SSH
+	Chk Reachability	host=192.168.128.8	port=${22}	timeout=${300}	interval=${10}	prompt=SSH
 
 VMX Basic Setup
 	[Documentation]	Configure root password, interface addresses and load licenses
 	[Tags]	VMX
-	@{vmx}	Create List	xwu-vmx17	xwu-vmx18
-	: For	${v}	in	@{vmx}
-	\	VMX Basic Setup	name=${v}	licenses=${lic}
-
-
-#Enable SR-IOV
-#	[Documentation]	Enable enhanced networking with SR-IOV support
-#	[Tags]	Performance
-#	@{hosts}	Create List	vmx09	vmx10
-#	: For	${host}	in	@{hosts}
-#	\	Stop Instance	${host}
-#	\	Enable SRIOV	${host}
-#	\	Start Instance	${host}
-#	\	Chk SRIOV	${host}
+	@{vmx}	Create List	vmx03	vmx04
+	VMX Basic Setup	names=@{vmx}	licenses=${lic}
 
 #Measure Performance using IPerf3
 #	[Documentation]	Configure proper interface and routes on hosts, and start test

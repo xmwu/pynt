@@ -18,6 +18,7 @@ Environment Variables Supported and their Default Values
        * PYNT_AWS_VMX_TYPE: m4.xlarge
        * PYNT_AWS_REGION:   us-west-1
        * PYNT_AWS_VPC_NAME: w01
+       * PYNT_AWS_PLACE_GROUP_NAME: ''
 
 '''
 from __future__ import print_function
@@ -76,6 +77,7 @@ def _get_env():
         'AWS_VMX_TYPE': 'm4.xlarge',
         'AWS_REGION':   'us-west-1',
         'AWS_VPC_NAME': 'w01',
+        'AWS_PLACE_GROUP_NAME': '',
     }
     for key, value in ini_values.iteritems():
         ntini[key] = os.environ.get('PYNT_' + key, value)
@@ -305,10 +307,11 @@ def get_dict_leaf(dictionary, path, separator='.'):
             return None
     return root
     
-def chk_host_port(host, port, interval=5, timeout=30, family=socket.AF_INET):
+def chk_host_port(host, port, interval=5, timeout=30, family=socket.AF_INET, prompt=None):
     '''Check host:port reacheability'''
     ts_start = time.time()
     hostup = False
+    svcup = False
     while time.time() - ts_start <= timeout:
         try:
             s = socket.socket(family, socket.SOCK_STREAM)
@@ -316,8 +319,18 @@ def chk_host_port(host, port, interval=5, timeout=30, family=socket.AF_INET):
             s.connect((host, port))
             ntlog("Host %s is reachable at port %d" %(host, port))
             hostup = True
-            s.close()
-            break
+            if prompt is not None:
+                data = s.recv(80)
+                if prompt in data:
+                    ntlog("Service is up with banner of " + prompt)
+                    svcup = True
+                    s.close()
+                    break
+                else:
+                    msg += "Service is down expecting banner of " + prompt
+            else :
+                s.close()
+                break
         except socket.error as e:
             ntlog("Host %s is not reachable at port %d." % (host, port))
             if e != socket.timeout:
@@ -327,6 +340,14 @@ def chk_host_port(host, port, interval=5, timeout=30, family=socket.AF_INET):
         sleep(interval)
     if not hostup:
         ntlog("Host %s is not reachable at port %d before %d seconds timeout" %  (host, port, timeout))
+    elif prompt is None: 
+        return hostup
+    elif not svcup:
+        ntlog("Host %s is reachable at port %d, but service %s is not up before %d seconds timeout" % (host, port, prompt, timeout))
+        return svcup
+    else:
+        ntlog("Service %s is up" % prompt)
+        return svcup
     return hostup
         
 def get_interface_ip(ifname="eth0"):
@@ -411,6 +432,7 @@ class NT(object):
         self.os = kargs.pop('os', 'junos').lower()       # OS
         self.tag = kargs.pop('tag', "R")                 # alias like r1
         self.conn_proto = kargs.pop('conn_proto', 'ssh') # ssh/telnet
+        self.login_enable = kargs.pop('login_enable', True) # auto login
         self.port = kargs.pop('port', None)
         if self.conn_proto == 'ssh':
             self.xfer_proto = 'scp'
@@ -435,18 +457,8 @@ class NT(object):
         self.screen = True
 
         if(self.conn_proto == 'ssh') :
-            self.h = pexpect.pxssh.pxssh(
-                options={"StrictHostKeyChecking": "no", 
-                "UserKnownHostsFile": "/dev/null"})
-            #self.h.SSH_OPTS += " -o StrictHostKeyChecking=no"
-            #self.h.SSH_OPTS += " -o UserKnownHostsFile=/dev/null"
-            self.h.logfile_read = sys.stdout #debug
-            self.h.PROMPT = NT.PROMPT
-            self.h.login(self.host, self.user, self.passwd, 
-                ssh_key=self.ssh_key,
-                auto_prompt_reset=self.auto_prompt_reset,
-                original_prompt = NT.PROMPT,
-            )
+            if self.login_enable :
+                self.login()
             if self.os == 'junos':
                 self.cmd("cli")
                 self.cmd("set cli screen-length 0")
@@ -454,6 +466,36 @@ class NT(object):
                 self._curr_mode = "cli"
         else :
             ntlog("the conn_proto is not supported\n")
+
+    def login(self):
+        retry = True
+        attempts = 3
+        interval = 15
+        while(retry):
+            try:
+                self.h = pexpect.pxssh.pxssh(
+                    options={"StrictHostKeyChecking": "no", 
+                    "UserKnownHostsFile": "/dev/null"})
+                self.h.logfile_read = sys.stdout #debug
+                self.h.PROMPT = NT.PROMPT
+                self.h.login(self.host, self.user, self.passwd, 
+                    ssh_key=self.ssh_key,
+                    auto_prompt_reset=self.auto_prompt_reset,
+                    original_prompt = NT.PROMPT,
+                )
+                retry=False
+                break
+            except pexpect.pxssh.ExceptionPxssh as e:
+                if e.value == "could not synchronize with original prompt":
+                    ntlog("ssh login not sync with prompt, retry again " + \
+                        "after %d seconds" % interval)
+                    self.h.close()
+                    attempts -= 1
+                    sleep(interval)
+                else:
+                    retry = False
+                    raise
+        return True
 
     def sendline(self, s):
         return self.h.sendline(s)
@@ -685,25 +727,31 @@ class NT(object):
                 password = ntini['ROOTPW']
             else:
                 password = ntini['PASSWORD']
+        self.h.sendline('') # workaround the issue sometimes, hung at password
         try:
             self.h.sendline(cfg)
-            pattern = [PROMPT, pexpect.EOF, 'error', 'password:', pexpect.TIMEOUT]
-            while True :
-                idx = self.h.expect(pattern, timeout=timeout)
-                if idx == 0 or idx == 1:
-                    break
-                elif idx == 2:
-                    result = False
-                    break
-                elif idx == 3:
-                    self.h.sendline(password)
-                elif idx == 4:
-                    ntlog(str(self.h))
-                    if re.search('password:', self.h.before):
-                        self.h.sendline(password)
-                    else:
-                        result = False
-                        break
+            #pattern = ['password:', 'error', PROMPT, pexpect.EOF, pexpect.TIMEOUT]
+            #while True :
+            #    idx = self.h.expect_exact(pattern, timeout=timeout)
+            #    if idx == 0:
+            #        self.h.sendline(password)
+            #    elif idx == 1:
+            #        result = False
+            #        break
+            #    elif idx == 2 or idx == 3:
+            #        break
+            #    elif idx == 4:
+            #        ntlog(str(self.h))
+            #        if re.search('password:', self.h.before):
+            #            self.h.sendline(password)
+            #        else:
+            #            result = False
+            #            break
+            self.h.expect_exact('password:')
+            self.h.sendline(password)
+            self.h.expect_exact('password:')
+            self.h.sendline(password)
+            self.h.expect(PROMPT)
             result &= self.commit()
         except:
             result = False

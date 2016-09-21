@@ -115,8 +115,36 @@ def vmx_prepare(ec2, cidr, nameprefix, subnets):
     eip = client.allocate_address(Domain='vpc')
     return vmx
 
+def throttle(api_call, MAX_RETRY=8, **kargs):
+    '''Generic handling of Request Limit Exceeded exception'''
 
+    if not callable(api_call):
+        ntlog("throttle: api_call has to be a function or method", 
+            level=logging.ERROR)
+        return None
+    retry = True
+    retries = 0
+    result = None
 
+    while retry and retries < MAX_RETRY:
+        try:
+            result = api_call(**kargs)
+            retry = False
+        except botocore.exceptions.ClientError as e:
+            # RequestLimitExceeded :
+            if e.response['Error']['Code'] != 'RequestLimitExceeded':
+                ntlog("Unexpceted error:" + str(sys.exc_info()[0]) + ' ' + \
+                str(e.response['Error']['Code']))
+                raise
+            interval = 2 ** retries
+            ntlog("%s %s. retry# %d after %d seconds for API Call %s" % \
+                (sys.exc_info()[0], str(e.response['Error']['Code']),
+                retries + 1, interval, api_call.__name__),
+                level=logging.WARNING)
+            sleep(interval)
+            retries += 1
+            retry = True
+    return result
 
 #instances = ec2.instances.filter(
 #    Filters=[{'Name': 'instance-state-name', 'Values': ['running']}])
@@ -185,7 +213,8 @@ class Ec2Instance(object):
         # typically not passed over
         min_count = 1, max_count = 1, 
         monitor_enable = False, inst_shutdown_behavior = 'stop', 
-        disable_api_termination = False
+        disable_api_termination = False,
+        placement = {}
         ):
         '''
         A pseudo child class of Instance. 
@@ -203,14 +232,16 @@ class Ec2Instance(object):
         self.ec2 = self.aec2.ec2
         self.client = self.ec2.meta.client
         self.instance = None
+        self.placement = placement
 
         if inst_id is not None:
             inst = self.ec2.Instance(inst_id)
             self.instance = inst
             self.name = inst_id
-            for tag in inst.tags:
-                if tag['Key'] == 'Name':
-                    self.name = tag['Value']
+            if inst.tags is not None:
+                for tag in inst.tags:
+                    if tag['Key'] == 'Name':
+                        self.name = tag['Value']
             nifs = {}
             for nif in inst.network_interfaces_attribute:
                 nifs[nif["Description"]] = \
@@ -238,6 +269,7 @@ class Ec2Instance(object):
                 Monitoring={'Enabled': monitor_enable},
                 DisableApiTermination=disable_api_termination, 
                 InstanceInitiatedShutdownBehavior=inst_shutdown_behavior,
+                Placement=placement,
                 )[0]
             ntlog("Instance %s lauched with ID %s" % (name, inst.instance_id))
             self.instance = inst
@@ -529,9 +561,14 @@ class Ec2Vpc(object):
 
     def get_route_tables(self):
         '''Get route tables associated with this VPC by name'''
-        rtts = self.ec2.route_tables.filter(Filters=[
-            {'Name': 'vpc-id', 'Values': [self.vpcid]},
-            ])
+        #api_call = "self.ec2.route_tables.filter(Filters=[" + \
+        #    "{'Name': 'vpc-id', 'Values': [" + self.vpcid + "]}," + \
+        #    "])"
+        rtts = throttle(self.ec2.route_tables.filter, 
+            Filters=[{'Name': 'vpc-id', 'Values': [self.vpcid]}])
+        #rtts = self.ec2.route_tables.filter(Filters=[
+        #    {'Name': 'vpc-id', 'Values': [self.vpcid]},
+        #    ])
         return list(rtts)
 
     def get_internet_gateway(self):
@@ -549,7 +586,7 @@ class Ec2Vpc(object):
             inetgw = list(gw)[0]
             ntlog("Internet gateway %s already exists and is attached to VPC" \
                 % inetgw.internet_gateway_id)
-        inetgw.create_tags(Tags=[{'Key': 'Name', 'Value': gw_name}])
+        throttle(inetgw.create_tags, Tags=[{'Key': 'Name', 'Value': gw_name}])
         return inetgw
 
     def get_subnet(self):
@@ -587,7 +624,8 @@ class Ec2Vpc(object):
         for nid in range(cnt_curr, cnt_curr+cnt):
             subnet = self.vpc.create_subnet(CidrBlock = subnets[nid])
             net_name = self.name + "-net" + str(nid)
-            subnet.create_tags(Tags=[{'Key': 'Name', 'Value': net_name}])
+            throttle(subnet.create_tags, 
+                Tags=[{'Key': 'Name', 'Value': net_name}])
             self.nets.append(subnet)
             self.enis[nid] = {}
         self.nets_cidr = self.get_subnet_cidr()
@@ -630,17 +668,21 @@ class Ec2Vpc(object):
             if desc is None:
                 octets = pip.split(".")
                 desc = "_".join((self.name, octets[2], octets[3]))
-            nif = self.nets_cidr[net].create_network_interface(
-                Description = desc, 
+            nif = throttle(self.nets_cidr[net].create_network_interface,
+                Description = desc,
                 Groups = sgs,
                 PrivateIpAddresses = pip_addresses)
-            self.enis[pip] = nif
-            nif.create_tags(Tags=[{'Key': 'Name', 'Value': desc}])
-            nif.modify_attribute(SourceDestCheck = {'Value': srcChk})
+            if nif is not None:
+                self.enis[pip] = nif
+                throttle(nif.create_tags, Tags=[{'Key': 'Name', 'Value': desc}])
+                throttle(nif.modify_attribute,
+                    SourceDestCheck = {'Value': srcChk})
+            else:
+                ntlog("Failed to create Network Interface %s" % pip,
+                    level=logging.ERROR)
         return nif
 
-    def add_if_safe(self, ip, sgs=[], srcChk=False, desc=None, retries=0,
-        MAX_RETRY=8):
+    def add_if_safe2(self, ip, sgs=[], srcChk=False, desc=None, MAX_RETRY=8):
         """add Elastic Network Interface
         
         ip: Private IP address. this can be either a 
@@ -663,23 +705,24 @@ class Ec2Vpc(object):
         RequestLimitExceeded botocore.exceptions.ClientError
         """
         retry = True
+        retries = 0
         nif = None
         while retry and retries < MAX_RETRY:
             try:
                 retry = False
                 nif = self.add_if(ip, sgs, srcChk, desc)
-            except botocore.exceptions.ClientError:
+            except botocore.exceptions.ClientError as e:
                 # RequestLimitExceeded :
                 interval = 2 ** retries
                 if type(ip) is list:
                     pip = ip[0]
                 else:
                     pip = ip
-                ntlog("RequestLimitExceeded %s. retry# %d after %d seconds"
-                    % (sys.exc_info()[0], retries + 1, interval), 
-                    level=logging.WARNING)
-                self.del_if(pip)
-                sleep(2**retries)
+                ntlog("ADD ENI %s %s. retry# %d after %d seconds"
+                    % (sys.exc_info()[0], str(e.response['Error']['Code']),
+                     retries + 1, interval), level=logging.WARNING)
+                sleep(interval)
+                self.del_if_safe(pip)
                 retries += 1
                 retry = True
         return nif
@@ -759,9 +802,38 @@ class Ec2Vpc(object):
         else:
             ntlog("Deleting Elastic Network Interface %s with Private IP of %s" 
                 % (self.enis[pip].network_interface_id, pip))
-            self.enis[pip].reload()
+            try:
+                self.enis[pip].reload()
+            except botocore.exceptions.ClientError:
+                ntlog("DEL IF - IF may not exist", logging.WARNING)
+                del self.enis[pip]
+                return False
             self.enis[pip].delete()
             del self.enis[pip]
+
+    def del_if_safe(self, pip, MAX_RETRY=8):
+        '''Delete ENI with graceful handling of RETRY_LIMIT_EXCEEDED'''
+        retry = True
+        retries = 0
+        if pip not in self.enis:
+            ntlog("ENI %s does not exist, aborting" % pip, logging.WARNING)
+            return True
+        while retry and retries < MAX_RETRY:
+            try:
+                self.del_if(pip)
+                retry = False
+            except botocore.exceptions.ClientError:
+                # RequestLimitExceeded :
+                interval = 2 ** retries
+                ntlog("DEL ENI RequestLimitExceeded %s. retry# %d after %d seconds"
+                    % (sys.exc_info()[0], retries + 1, interval),
+                    level=logging.WARNING)
+                sleep(interval)
+                retries += 1
+                retry = True
+        return retries < MAX_RETRY
+                
+
 
     def cleanup(self):
         '''Clean VPC and its dependencies. 

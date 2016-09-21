@@ -57,6 +57,9 @@ class VmxAws(object):
             subnet_mask=self.subnet_mask)
         self.subnet_cidr = get_subnets(base=self.cidr, mask=self.subnet_mask,
             num = self.subnet_cnt)
+        self.placement = {}
+        if ntini['AWS_PLACE_GROUP_NAME'] != '' :
+            self.placement['GroupName'] = ntini['AWS_PLACE_GROUP_NAME']
 
     def vpc_cleanup(self):
         '''cleanup VPC and its associated resources'''
@@ -84,7 +87,7 @@ class VmxAws(object):
                 if subnetidx == 0 :
                     ips.append(decimal2ip(ip2decimal(addr) + 
                         2**(32 - self.subnet_mask - 1)))
-                self.evpc.add_if_safe(ip=ips, sgs=sgs)
+                self.evpc.add_if(ip=ips, sgs=sgs)
 
     def vpc_create_route_table(self, rtt_cnt=3):
         self.evpc.add_route_tables(rtt_cnt)
@@ -95,7 +98,8 @@ class VmxAws(object):
         self.evpc.get_internet_gateway()
         self.evpc.set_route_table_main_gw()
         
-    def _launch_instance(self, inst_name, ami, key_name, inst_type, ips):
+    def _launch_instance(self, inst_name, ami, key_name, inst_type, ips, 
+        placement):
         #inst_params = {
         #    "vmx01": ["192.168.0.4", "192.168.1.4", "192.168.2.4"],
         #    #"vmx02": ["192.168.0.5", "192.168.2.5", "192.168.3.5"],
@@ -114,19 +118,22 @@ class VmxAws(object):
                 else:
                     ntlog("Invalid interface IP address", level=logging.ERROR)
             if pip not in self.evpc.enis:
-                eni = self.evpc.add_if_safe(ip=pip, sgs=sgs)
+                eni = self.evpc.add_if(ip=pip, sgs=sgs)
             else:
                 eni = self.evpc.enis[pip]
             vmx_enis.append(eni)
             ntlog("Private IP is " + pip)
         awsec2.Ec2Instance(evpc = self.evpc, 
-            enis = vmx_enis, name = inst_name,
+            enis = vmx_enis, name = inst_name, placement = placement,
             inst_type = inst_type, key_name = key_name, ami_id = ami)
 
     def launch_instances(self, inst_params, ami=ami_vmx,
-        key_name=ec2_key_name, inst_type=vmx_inst_type, ifcount = 3) :
+        key_name=ec2_key_name, inst_type=vmx_inst_type, ifcount = 3,
+        placement = {}) :
         # launch vmx instances with inst_params as dictionary with keys
         # name, addr_start (+offset from addr_low), ami_id, inst_type, if_cnt
+        if len(placement) == 0:
+            placement = self.placement
         for inst_p in inst_params :
             if inst_p['iname'] in self.evpc.ec2instances:
                 ntlog("VMX Instance already exists, setup aborted.")
@@ -148,7 +155,7 @@ class VmxAws(object):
             if "ips" in inst_p :
                 _ips = inst_p["ips"]
             self._launch_instance(inst_name=name, key_name=key_name, 
-                inst_type=_inst_type, ami=_ami, ips=_ips)
+                inst_type=_inst_type, ami=_ami, ips=_ips, placement=placement)
 
     def _launch_two_vmx(self):
         iparams = [
@@ -176,11 +183,12 @@ class VmxAws(object):
         ntlog("Now Private Address %s is mapped to Public Address %s" % \
             (pvt_ip, pub_ip))
 
-    def start_instance(self, inst_name):
+    def start_instance(self, inst_name, wait=False):
         if type(inst_name) is not list:
             inst_name = [inst_name]
         for iname in inst_name:
             self.evpc.ec2instances[iname].start()
+
         
     def stop_instance(self, inst_name):
         if type(inst_name) is not list:
@@ -197,10 +205,16 @@ class VmxAws(object):
 
 
     def install_iperf3(self, inst_name, key=ec2_key_file):
-        self.evpc.ec2instances[inst_name].install_iperf3(key=key)
+        if type(inst_name) is not list:
+            inst_name = [inst_name]
+        for iname in inst_name:
+            self.evpc.ec2instances[iname].install_iperf3(key=key)
 
     def install_ixgbevf(self, inst_name, key=ec2_key_file):
-        self.evpc.ec2instances[inst_name].install_ixgbevf(key=key)
+        if type(inst_name) is not list:
+            inst_name = [inst_name]
+        for iname in inst_name:
+            self.evpc.ec2instances[iname].install_ixgbevf(key=key)
 
     def throughput_with_iperf3(self, host1, host2, gw=[0, 0], ifidx=[1, 2]):
         self.evpc.get_throughput(host1, host2, ec2_key_file, gw, ifidx)
@@ -238,13 +252,14 @@ class VmxAws(object):
         '''
         results = [] # list of dict w/ enc, auth, mss, bps
         ipsec = [
-            ['3des-cbc',        'hmac-sha1-96'],
+            #['3des-cbc',        'hmac-sha1-96'],
             ['aes-256-cbc',     'hmac-sha1-96'],
-            ['aes-256-gcm',     None],
-            ['aes-128-cbc',     'hmac-sha1-96'],
+            #['aes-256-gcm',     None],
+            #['aes-128-cbc',     'hmac-sha1-96'],
             ['aes-128-gcm',     None],
             ]
-        mss = [1448, 1400, 1300, 1000, 500, 128]
+        mss = [1448, 1400]
+        #mss = [1448, 1400, 1300, 1000, 500, 128]
         # mss = [1448, 1408, 1300, 1000, 500, 128]
         pub_add = []
         pvt0_add = []
@@ -384,6 +399,7 @@ class VmxAws(object):
         if inst.chk_sriov():
             status = "enabled"
         ntlog("SRIOV Net Support for instance %s is %s" % (inst_name, status))
+        return status == "enabled"
 
     def enable_sriov(self, inst_name):
         if type(inst_name) is not list:
@@ -424,10 +440,11 @@ class VmxAws(object):
             * enable http access to RIOT stats
 
         '''
-        if type(names) is str:
+        if type(names) is not list:
             names = [names]
         result = True
         for name in names:
+            name = str(name)
             vmx = Vmx(self.evpc.ec2instances[name])
             if rootpw is None:
                 rootpw = ntini['ROOTPW']
@@ -444,11 +461,12 @@ class VmxAws(object):
                 ntlog("License not specified, skipping lic installation")
             result &= vmx.cfg_interfaces()
             result &= vmx.cfg_ipsec_direct()
+            result &= vmx.chk_pic(fpc=0, pic=0, timeout=15, retries=20) 
             result &= vmx.set_riot_http()
         return result
 
     def launch_lnx_instances(self, inst_params):
-        itype_lnx = "c4.8xlarge"
+        itype_lnx = "m4.10xlarge"
         ifcount = 5
         lnx_instances = []
         for idx in [23, 24]:
@@ -511,6 +529,10 @@ class VmxAws(object):
         dip = lnx.instance.private_ip_address
         dport = 8000
         cmd = "sudo hping3 -p %d -2 --flood --rand-source " % dport + dip
+
+    def chk_reachability(self, host, port, timeout=300, interval=15, prompt=None):
+        """verify whether host is reached at TCP port witin timeout"""
+        return chk_host_port(host=host, port=port, timeout=timeout, interval=interval, prompt=prompt)
 
 class Vmx(NT):
     license_path = "../misc/aws"
@@ -812,15 +834,80 @@ term DEFAULT then accept"""
 
 def usage():
     print sys.argv[0] + " -v <vpc_name> -i <instance_name> -o <operation>"
+    cmd_help = """
+Vmx Test in AWS - A set of quick tasks via command line
+
+Options
+=======
+
+ -o Operation  
+    vpc_init        Initialize A VPC
+    cleanup         Remove a given VPC and resources associated with it
+    start-instance  Start an instance specified by -i or instances specified
+                    by --instances
+    stop-instance   Stop an instance specified by -i or instances specified by
+                    --instances
+    terminate       Terminate an instance specified by -i or instances specified
+                    by --instances
+    chk-sriov       Check whether SRIOV or Enhanced Networking is enabled for
+                    the instance(s) specified by -i or --instances
+    enable-sriov    Enable SRIOV or Enhanced Networking for the instance(s)
+                    specified by -i or --instances
+    set-vpc-peering Set Peering between two VPCs and create necessary routes
+                    for reachability
+    add-subnets     Create subnets. 
+    create-security-groups
+                    Create security groups predefined int and ext
+    create-interfaces
+                    Create interfaces for each subnet. The number of ENIs
+                    to be created for each subnet is defined by --eni-per-subnet
+    cfg-lnx-hosts   Install necessary packages and enable SR-IOV
+    launch-ipsec-instances
+                    Launch multiple pairs of VMXes for IPSec testing
+                    Use --ipsecvmx to specify sequence of pairs to launch
+                    0 - m4.xlarge
+                    1 - m4.2xlarge
+                    2 - m4.4xlarge
+                    3 - m4.10xlarge
+                    4 - c3.2xlarge
+                    5 - c3.4xlarge
+                    6 - c3.8xlarge
+                    7 - c4.2xlarge
+                    8 - c4.4xlarge
+                    9 - c4.8xlarge
+    vmx-install-license
+                    Install licenses for VMX. Files specified via --license
+    get-console-output
+                    Dump console output for instances
+    install-iperf3  Install iperf3 via git for Linux hosts
+    vmx-basic-setup Preconfigure VMX from scratch including IPSec
+
+ -i --instance      Instance name
+ -v --vpc-name      VPC name
+
+ --instances        a list of instances separated by ":"
+ --rootpw           Root password for initial VMX config
+ --instance-type    Type of instance
+ --ami-vmx          AMI for VMX
+ --vmx-license      A list of licenses to be preinstalled during config for 
+                    for VMXes. Separated by ":"
+ --ipsecvmx         sequence numbers separated by ":" for IPSec VMX pairs
+ --vpcs             VPCs separated by ":"
+ --gw-offset        Required for IPerf Test, which pair of VMX to use
+ --eni-per-subnet   Number of ENIs to be created per Subnet
+ --subnet-cnt       Number of Subnets to be created
+
+"""
+    print cmd_help
 
 def main():
 
     try:
         opts, args = getopt.getopt(sys.argv[1:], 
-            "hi:o:v:", ["help", "instance=", "vpc=", "oper=", "instance-type=",
+            "hwi:o:v:", ["help", "instance=", "vpc=", "oper=", "instance-type=",
             "vmx-license=", "ami-vmx=", "inst-params=", "rootpw=", 
             "gw-offset=", "vpcs=", "subnet-cnt=", "instances=",
-            "ipsecvmx=",
+            "ipsecvmx=", "eni-per-subnet=",
             ])
     except getopt.GetoptError as err:
         print str(err)
@@ -834,10 +921,13 @@ def main():
     gw_offset = [0, 0]
     instances = []
     ipsec_vmx = []
+    wait = False # wait for instance/vmx fully accessible
     for opt, arg in opts:
         if opt == '-h':
             usage()
             sys.exit(1)
+        elif opt == "-w":
+            wait = True
         elif opt in ("-i", "--instance"):
             inst_name = arg
         elif opt in ("-v", "--vpc-name"):
@@ -861,7 +951,9 @@ def main():
         elif opt in ("--vpcs"):
             vpcs = arg.split(":")
         elif opt in ("--subnet-cnt"):
-            subnet_cnt = arg
+            subnet_cnt = int(arg)
+        elif opt in ("--eni-per-subnet"):
+            eni_per_subnet = int(arg)
         elif opt in ("--instances"):
             instances = map(str, arg.split(":"))
     if '' in (inst_name + vpc_name, oper):
@@ -880,17 +972,17 @@ def main():
     elif oper == "setup-all":
         vmxaws.setup_all(ami_vmx)
     elif oper == "install-iperf3":
-        vmxaws.install_iperf3(inst_name)
+        vmxaws.install_iperf3(instances)
     elif oper == "install-ixgbevf":
-        vmxaws.install_ixgbevf(inst_name)
+        vmxaws.install_ixgbevf(instances)
     elif oper == "cfg-iperf3-vmx":
-        vmxaws.cfg_iperf3_vmx(inst_name)
+        vmxaws.cfg_iperf3_vmx(instances)
     elif oper == "iperf3-bw":
-        vmxaws.throughput_with_iperf3("lnx01", "lnx02", gw_offset)
+        vmxaws.throughput_with_iperf3("xwu-lnx01", "xwu-lnx02", gw_offset)
     elif oper == "get-console-output":
         vmxaws.get_console_output(inst_name)
     elif oper == "start-instance":
-        vmxaws.start_instance(instances)
+        vmxaws.start_instance(instances, wait)
     elif oper == "stop-instance":
         vmxaws.stop_instance(instances)
     elif oper == "chk-sriov":
@@ -917,6 +1009,10 @@ def main():
         vmxaws.vpc_create_subnet(subnet_cnt)
     elif oper == "cfg-lnx-hosts":
         vmxaws.cfg_lnx_hosts(instances)
+    elif oper == "create-security-groups":
+        vmxaws.vpc_create_security_groups()
+    elif oper == "create-interfaces":
+        vmxaws.vpc_create_interface(eni_per_subnet)
     else:
         ntlog("unsupported operation " + oper)
         usage()
