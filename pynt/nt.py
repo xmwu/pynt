@@ -1,4 +1,4 @@
-'''This class extends pexpect.spawn to simulate device handles and 
+'''This class extends pexpect.spawn to simulate device handles and
 related operation methods
 TODO - exception handling
 
@@ -22,11 +22,11 @@ Environment Variables Supported and their Default Values
 
 '''
 from __future__ import print_function
-import time,datetime
-import os,sys,re
-import getopt,pexpect
+import time, datetime
+import os, sys, re
+import getopt, pexpect
 import socket, struct, fcntl, threading
-import binascii,logging
+import binascii, logging
 import xml.etree.ElementTree as ET
 import pprint
 
@@ -35,8 +35,8 @@ try:
     from pysnmp.hlapi import *
 except ImportError: # pragma: no cover
     err = sys.exc_info()[1]
-    raise ImportError(str(err) + '''Not all modules were found. Please check Operating System and Python Modules.
-''')
+    raise ImportError(str(err) + "Not all modules were found. " + \
+        "Please check Operating System and Python Modules.")
 
 __author__ = 'Sean Wu'
 __email__ = 'seanwu@gmail.com'
@@ -45,7 +45,7 @@ __version__ = '0.1'
 __revision__ = ""
 #__all__ = ['ExceptionPyNT', 'new', 'cmd', '__version__', '__revision__']
 
-PY3 = (sys.version_info[0] >=3)
+PY3 = (sys.version_info[0] >= 3)
 #PROMPT = '[>#%\$](?:\033\[0m \S*)?\s*$'
 PROMPT = '[>#%\$] $'
 PROMPT_MORE = '^ --More--[\s\b]*';
@@ -62,6 +62,7 @@ pp = pprint.PrettyPrinter(indent=4)
 
 ntini = {}
 def _get_env():
+    '''Internal function'''
     ini_values = {
         'USER':         'pynt',
         'PASSWORD':     'PyNT123',
@@ -78,6 +79,7 @@ def _get_env():
         'AWS_REGION':   'us-west-1',
         'AWS_VPC_NAME': 'w01',
         'AWS_PLACE_GROUP_NAME': '',
+        'ASN':          65000,
     }
     for key, value in ini_values.iteritems():
         ntini[key] = os.environ.get('PYNT_' + key, value)
@@ -89,6 +91,7 @@ def _get_env():
 _get_env()
 
 def ntlogger():
+    '''Create NT Logger'''
     logLevel = logging.DEBUG
     nlog = logging.getLogger('pynt')
     nlog.setLevel(logLevel)
@@ -107,25 +110,26 @@ def ntlogger():
 nlog = ntlogger()
 
 # Utility methods
-def ip2decimal(ip, family=0) :
+def ip2decimal(ip, family=socket.AF_INET):
     '''
     Convert IPv4 and IPv6 to Integer, with family optional
     '''
-    if(family == socket.AF_INET or reIp4Addr.match(ip)) :
+    if family == socket.AF_INET or reIp4Addr.match(ip):
         return struct.unpack("!L", socket.inet_aton(ip))[0]
-    elif(family == socket.AF_INET6 or reIp6Addr.match(ip)) :
-        return  int(binascii.hexlify(socket.inet_pton(socket.AF_INET6, ip)), 16)
-    else :
+    elif family == socket.AF_INET6 or reIp6Addr.match(ip):
+        return int(binascii.hexlify(socket.inet_pton(socket.AF_INET6, ip)), 16)
+    else:
         ntlog("Invalid IP address " + ip)
 
-def decimal2ip(number, family=0) :
+def decimal2ip(number, family=socket.AF_INET):
     '''
     Convert integer to IPv4 or IPv6 address, here family might be useful
     esp when a number derived from ::1.1.1.1
     '''
-    if(number > 4294967295) :
-        return socket.inet_ntop(socket.AF_INET6, binascii.unhexlify('%032x' % number))
-    else :
+    if number > 4294967295:
+        return socket.inet_ntop(socket.AF_INET6,
+            binascii.unhexlify('%032x' % number))
+    else:
         return socket.inet_ntoa(struct.pack('!L', number))
 
 def get_mask(base):
@@ -142,7 +146,8 @@ def get_mask(base):
 
 def _get_mask_single(base):
     if type(base) is not str or "/" not in base:
-        ntlog("get_mask: invalid base %s and the type is %s" % (base, type(base)), level=logging.ERROR)
+        ntlog("get_mask: invalid base %s and the type is %s" % \
+            (base, type(base)), level=logging.ERROR)
         return None
     parts = base.split("/")
     return int(parts[1])
@@ -150,7 +155,7 @@ def _get_mask_single(base):
 
 def get_network(ips):
     '''
-    Returns the network b lock for an IP "address/netmask".
+    Returns the network block for an IP "address/netmask".
     '''
     masks = get_mask(ips)
     networks = []
@@ -191,7 +196,7 @@ def get_subnets(base, mask=None, num=None, offset=0):
         * *base* network address/block to start from
         * *mask* network mask length, default is to derive from num
         * *num* number of subnets to be returned, default is return all
-        * *offset* offset added to subnet network address, default is 0, 
+        * *offset* offset added to subnet network address, default is 0,
     '''
     if mask is None and num is None:
         ntlog("Base network needs netmask unless NUM and MASK sepcified",
@@ -212,7 +217,7 @@ def get_subnets(base, mask=None, num=None, offset=0):
         if num < 1 or hosts_per_subnet < 1:
             ntlog("Invalid netmask or number", level=logging.ERROR)
             return None
-        mask = bits - int(log(hosts_per_subnet) / log (2))
+        mask = bits - int(log(hosts_per_subnet) / log(2))
     base_d = ip2decimal(strip_mask(get_network(strip_mask(base)+"/"+str(mask))))
     mask_d = 2 ** (bits - mask) # Python supports L well
     offset %= mask_d # no special need for negative offset
@@ -235,12 +240,12 @@ def ip_add(ip, offset):
 
 def chk_ip(ip):
     '''
-    return family of ip in socket.AF_INET for IPv4 and socket.AF_INET6 for 
+    return family of ip in socket.AF_INET for IPv4 and socket.AF_INET6 for
     IPv6. otherwise, return 0
     '''
     if reIp6Addr.match(ip):
         return socket.AF_INET6
-    elif reIp4Addr.match(ip) :
+    elif reIp4Addr.match(ip):
         return socket.AF_INET
     else:
         return 0
@@ -254,11 +259,11 @@ def sort_ip(ips):
     if type(ips) is not list:
         valid = False
     for ip in ips:
-        if chk_ip(ip) != socket.AF_INET :
+        if chk_ip(ip) != socket.AF_INET:
             valid = False
             break
     if valid:
-        return sorted(ips, key=lambda ip: struct.unpack("!L", 
+        return sorted(ips, key=lambda ip: struct.unpack("!L",
             socket.inet_aton(ip))[0])
     else:
         ntlog("sort_ip: only list of IPv4 addresses is supported. Aborting...",
@@ -266,7 +271,7 @@ def sort_ip(ips):
         return valid
 
 
-def ntlog(msg, level=logging.INFO) :
+def ntlog(msg, level=logging.INFO):
     '''
     Standard logging with timestamp, level. facility and user TBD
     '''
@@ -291,7 +296,7 @@ def sleep(interval):
     return True
 
 def get_dict_leaf(dictionary, path, separator='.'):
-    '''extract a leaf of chained dictionary and keys joined with 
+    '''extract a leaf of chained dictionary and keys joined with
     separators'''
     paths = path.split(separator)
     root = dictionary
@@ -303,11 +308,13 @@ def get_dict_leaf(dictionary, path, separator='.'):
             (type(root) is list and key < len(root)):
             root = root[key]
         else:
-            ntlog("get_dict_leaf does not contain key %s" % str(key), logging.ERROR)
+            ntlog("get_dict_leaf does not contain key %s" % str(key),
+                logging.ERROR)
             return None
     return root
-    
-def chk_host_port(host, port, interval=5, timeout=30, family=socket.AF_INET, prompt=None):
+
+def chk_host_port(host, port, interval=5, timeout=30,
+    family=socket.AF_INET, prompt=None):
     '''Check host:port reacheability'''
     ts_start = time.time()
     hostup = False
@@ -328,7 +335,7 @@ def chk_host_port(host, port, interval=5, timeout=30, family=socket.AF_INET, pro
                     break
                 else:
                     msg += "Service is down expecting banner of " + prompt
-            else :
+            else:
                 s.close()
                 break
         except socket.error as e:
@@ -339,17 +346,20 @@ def chk_host_port(host, port, interval=5, timeout=30, family=socket.AF_INET, pro
             s = None
         sleep(interval)
     if not hostup:
-        ntlog("Host %s is not reachable at port %d before %d seconds timeout" %  (host, port, timeout))
-    elif prompt is None: 
+        ntlog("Host %s is not reachable at port %d before %d seconds timeout" \
+            % (host, port, timeout))
+    elif prompt is None:
         return hostup
     elif not svcup:
-        ntlog("Host %s is reachable at port %d, but service %s is not up before %d seconds timeout" % (host, port, prompt, timeout))
+        ntlog("Host %s is reachable at port %d," % (host, port) + \
+            " but service %s is not up before %d seconds timeout" \
+            % (prompt, timeout))
         return svcup
     else:
         ntlog("Service %s is up" % prompt)
         return svcup
     return hostup
-        
+
 def get_interface_ip(ifname="eth0"):
     '''Get local Linux interface IP address'''
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -359,7 +369,7 @@ def get_interface_ip(ifname="eth0"):
         struct.pack('256s', ifname[:15])
         )[20:24])
 
-class ExceptionPyNT(Exception) :
+class ExceptionPyNT(Exception):
     ''' Raised for PyNT exceptions.
     '''
 
@@ -367,23 +377,23 @@ class ExceptionPyNT(Exception) :
 
 class Timer(object):
     '''A simple Timer, ideal for recording event of sequence'''
-    def __init__(self, name = "Unknown Event"):
+    def __init__(self, name="Unknown Event"):
         self.name = name
-        self.steps = [{'Step': 'Start', 'Datetime': 
+        self.steps = [{'Step': 'Start', 'Datetime':
             datetime.datetime.now()}]
-    
-    def update(self, name = None):
+
+    def update(self, name=None):
         if name is None:
             name = str(len(self.steps))
         self.steps.append({'Step': name, 'Datetime': datetime.datetime.now()})
 
-    def stop(self, name = "Stop"):
+    def stop(self, name="Stop"):
         self.steps.append({'Step': name, 'Datetime': datetime.datetime.now()})
         self.log()
 
     def log(self):
         msg = "\nEvent %s has a total of %d steps and was completed in %s\n" % \
-            (self.name, len(self.steps), 
+            (self.name, len(self.steps),
             (self.steps[-1]['Datetime'] - self.steps[0]['Datetime']),
             )
         for stepid in range(len(self.steps)):
@@ -391,14 +401,14 @@ class Timer(object):
             elapsed = 0
             if stepid != 0:
                 elapsed = step['Datetime'] - self.steps[stepid - 1]['Datetime']
-            msg += "Step %d %s: Time: %s Elapsed: %s\n" % (stepid, 
+            msg += "Step %d %s: Time: %s Elapsed: %s\n" % (stepid,
                 step['Step'], step['Datetime'], elapsed)
         ntlog(msg)
-                
+
 class NT(object):
-    '''Main class interface for PyNT object with the following attributes, 
+    '''Main class interface for PyNT object with the following attributes,
     of which only **host** is requried. Not directly inherited from pexpect,
-    so that it may be easily modified to use other underlying connection 
+    so that it may be easily modified to use other underlying connection
     modules, such as PyEZ
 
         * **host** : An IP or hostname for the entity
@@ -408,20 +418,25 @@ class NT(object):
         * *os* : operating system with default as junos
         * *timeout* : login timeout with default of 30 seconds
         * *cmd_timeout* : command timeout with default of 60 seconds
-        * *conn_proto* : Connection protocol, only *ssh* and *telnet* is supported now
-        * *hostlog* : Log filename for this host. The default is *host.log* with host being the provided argument.
+        * *conn_proto* : Connection protocol, only *ssh* and *telnet* is
+            supported now
+        * *hostlog* : Log filename for this host. The default is *host.log*
+            with host being the provided argument.
         * *ssh_key* : ssh private key for login, it overrides password
 
     The following argument is not common
-        * *host1* : Attempts to make second connection to backup RE. Only valid for junos devices. The default is host1 with host being the provided argument
-        * *commitsync* : 0 or 1. commit synchronization for commit in config mode
+        * *host1* : Attempts to make second connection to backup RE.
+            Only valid for junos devices. The default is host1 with host
+            being the provided argument
+        * *commitsync* : 0 or 1. commit synchronization for commit in
+            config mode
         * *retries* : number of retries for login with default of 8
         * *auto_prompt_reset* : pass to pexpect
 
     '''
     # Global Variables
     PROMPT = '[>#%\$](?:\033\[0m \S*)?\s*$'
-    PROMPT_MORE='^---?\(?[^)]*?[Mm]ore[^)]*\)?---?\s*'
+    PROMPT_MORE = '^---?\(?[^)]*?[Mm]ore[^)]*\)?---?\s*'
     CMD_TIMEOUT = 300
     def __init__(self, host, **kargs):
         # instance variable
@@ -444,11 +459,12 @@ class NT(object):
                 self.port = 23
         self.timeout = kargs.pop('timeout', 30)          # login timeout
         self.cmd_timeout = kargs.pop('cmd_timeout', 60)  # command timeout
-        self.host_log = kargs.pop('host_log', self.host+'.log')   # name if not host
-        self.ssh_key = kargs.pop('ssh_key', None) # 
-        self._curr_mode = kargs.pop('mode', 'shell') #cli|config|vty|netconf|junoscript
+        self.host_log = kargs.pop('host_log', self.host+'.log')# if not host
+        self.ssh_key = kargs.pop('ssh_key', None) #
+        self._curr_mode = kargs.pop('mode', 'shell')
+            #cli|config|vty|netconf|junoscript
         self.host1 = kargs.pop('host1', self.host+"1")        # if dual_re
-        self.commitsync = kargs.pop('commit_synchronize', 0) 
+        self.commitsync = kargs.pop('commit_synchronize', 0)
         self.dut = kargs.pop('dut', 0)                   # Device under Test
         self.retries = kargs.pop('tries', 8)               # retries to connect
         self.auto_prompt_reset = kargs.pop('auto_prompt_reset', False)
@@ -456,34 +472,34 @@ class NT(object):
         self._old_mode = self._curr_mode
         self.screen = True
 
-        if(self.conn_proto == 'ssh') :
-            if self.login_enable :
+        if self.conn_proto == 'ssh':
+            if self.login_enable:
                 self.login()
             if self.os == 'junos':
                 self.cmd("cli")
                 self.cmd("set cli screen-length 0")
                 self._old_mode = self._curr_mode
                 self._curr_mode = "cli"
-        else :
+        else:
             ntlog("the conn_proto is not supported\n")
 
     def login(self):
         retry = True
         attempts = 3
         interval = 15
-        while(retry):
+        while retry:
             try:
                 self.h = pexpect.pxssh.pxssh(
-                    options={"StrictHostKeyChecking": "no", 
+                    options={"StrictHostKeyChecking": "no",
                     "UserKnownHostsFile": "/dev/null"})
                 self.h.logfile_read = sys.stdout #debug
                 self.h.PROMPT = NT.PROMPT
-                self.h.login(self.host, self.user, self.passwd, 
+                self.h.login(self.host, self.user, self.passwd,
                     ssh_key=self.ssh_key,
                     auto_prompt_reset=self.auto_prompt_reset,
-                    original_prompt = NT.PROMPT,
+                    original_prompt=NT.PROMPT,
                 )
-                retry=False
+                retry = False
                 break
             except pexpect.pxssh.ExceptionPxssh as e:
                 if e.value == "could not synchronize with original prompt":
@@ -506,9 +522,9 @@ class NT(object):
     def expect(self, pattern, timeout=-1, searchwindowsize=-1, async=False):
         return self.h.expect(pattern, timeout, searchwindowsize, async)
 
-    def set_xfer_proto(self, proto, ftp_port = 21, ftp_passive = True):
-        ''' 
-        Set file transfer protocols to either ssh or ftp. 
+    def set_xfer_proto(self, proto, ftp_port=21, ftp_passive=True):
+        '''
+        Set file transfer protocols to either ssh or ftp.
         if conn_proto is ssh, the default is scp.
         TODO - ftp support is to be added
         '''
@@ -517,18 +533,18 @@ class NT(object):
         elif proto == "ftp":
             self.xfer_proto = proto
             self.ftp_port = ftp_port
-            self.ftp_passive = ftp_passive 
+            self.ftp_passive = ftp_passive
         else:
-            ntlog("unable to set file transfer protocol %s" % proto, 
+            ntlog("unable to set file transfer protocol %s" % proto,
                 level=logging.ERROR)
 
-    def get_dut(self) :
+    def get_dut(self):
         return self.dut
 
-    def get_tag(self) :
+    def get_tag(self):
         return self.tag
 
-    def get_os(self) :
+    def get_os(self):
         '''Return OS type of the object'''
         return self.os
 
@@ -536,7 +552,7 @@ class NT(object):
         '''
         JUNOS devices have several different modes of operation
         cli is the hub, with access to vty, shell, config
-        target is only valid with vty mode for pfe target identification 
+        target is only valid with vty mode for pfe target identification
         string, like fpc0
         '''
         if self._curr_mode == mode:
@@ -579,7 +595,7 @@ class NT(object):
         self.sendline("su -")
         self.expect("Password:")
         self.sendline(rootpw)
-        index = self.expect(["su: Authentication failure", "su: Sorry", 
+        index = self.expect(["su: Authentication failure", "su: Sorry",
             self.PROMPT, pexpect.EOF, pexpect.TIMEOUT])
         if index == 0 or index == 1:
             ntlog("Password error", logging.WARNING)
@@ -587,7 +603,7 @@ class NT(object):
         if index == 2 or index == 3:
             return True
 
-    def mode_cli(self) :
+    def mode_cli(self):
         '''
         alias of device.mode("cli")
         '''
@@ -597,22 +613,23 @@ class NT(object):
         self.mode("cli")
 
 
-    def _mode_cli(self) :
+    def _mode_cli(self):
         # internal routine, change to cli temporary
-        if(self._old_mode != "cli") :
+        if self._old_mode != "cli":
             self.h.sendline("cli")
             self.h.prompt()
 
-    def _mode_restore(self, new_mode="cli") :
+    def _mode_restore(self, new_mode="cli"):
         return self.mode(self._old_mode)
 
-    def cli(self, cmd, timeout=CMD_TIMEOUT) :
+    def cli(self, cmd, timeout=CMD_TIMEOUT):
         '''
         Alias of device.cmd(cmd, mode="cli")
         '''
         return self.cmd(cmd, mode="cli", timeout=timeout)
 
-    def cmd(self, cmd, mode=None, xml="false", timeout=CMD_TIMEOUT, xmlns=False) :
+    def cmd(self, cmd, mode=None, xml="false", timeout=CMD_TIMEOUT,
+        xmlns=False):
         '''
         Execute a single command if a string is passed. If a list is provided
         via cmd arguments, it executes all commands one by one
@@ -631,7 +648,7 @@ class NT(object):
                 output.append(self._cmd_single(onecmd, xml, timeout, xmlns))
         else:
             output = self._cmd_single(cmd, xml, timeout, xmlns)
-        if mode_restore :
+        if mode_restore:
             self._mode_restore()
         return output
 
@@ -641,15 +658,15 @@ class NT(object):
         try:
             self.h.sendline(cmd)
             prompt_pattern = [PROMPT, PROMPT_MORE]
-            while True :
-                idx = self.h.expect(prompt_pattern, timeout = timeout)
+            while True:
+                idx = self.h.expect(prompt_pattern, timeout=timeout)
                 if idx == 0:
                     break
                 elif idx == 1:
                     self.h.send(" ")
         except:
             ntlog("command failed with exception: %s" % sys.exc_info()[0],
-                level = logging.ERROR)
+                level=logging.ERROR)
         # had to remvoe first and last line
         output = "\n".join(self.h.before.split("\r\n")[1:-1])
         if xml == "xpath":
@@ -673,15 +690,15 @@ class NT(object):
         if sync is not None:
             cs = sync
         cmd = "commit"
-        if cs :
+        if cs:
             cmd += " synchronize"
         self.mode("config")
         result = True
         exRaised = False
-        pattern=[PROMPT, 'error']
+        pattern = [PROMPT, 'error']
         try:
             self.h.sendline(cmd) # + " and-quit")
-            idx = self.h.expect(pattern, timeout = timeout)
+            idx = self.h.expect(pattern, timeout=timeout)
             if idx == 1:
                 result = False
         except:
@@ -701,7 +718,11 @@ class NT(object):
         result = True
         mode_old = self._curr_mode
         result &= self.mode("config")
-        for config in cfg.split("\n"):
+        if type(cfg) is list:
+            configs = cfg
+        else:
+            configs = cfg.split("\n")
+        for config in configs:
             self._cmd_single(config)
         if commit:
             result &= self.commit()
@@ -719,7 +740,8 @@ class NT(object):
             cfg = "root-"
         cfg = "set system " + cfg + "authentication plain-text-password"
         if usrclass is not None and user != "root":
-            self.sendline("set system login user %s class %s" % (user, usrclass))
+            self.sendline("set system login user %s class %s" % \
+                (user, usrclass))
         result = True
         timeout = 10
         if password is None:
@@ -730,7 +752,8 @@ class NT(object):
         self.h.sendline('') # workaround the issue sometimes, hung at password
         try:
             self.h.sendline(cfg)
-            #pattern = ['password:', 'error', PROMPT, pexpect.EOF, pexpect.TIMEOUT]
+            #pattern = ['password:', 'error', PROMPT, pexpect.EOF,
+            #    pexpect.TIMEOUT]
             #while True :
             #    idx = self.h.expect_exact(pattern, timeout=timeout)
             #    if idx == 0:
@@ -755,9 +778,10 @@ class NT(object):
             result &= self.commit()
         except:
             result = False
-        if not result :
+        if not result:
             ntlog(str(self.h))
-            ntlog("Password config failed with %s" % sys.exc_info()[0], level=logging.ERROR)
+            ntlog("Password config failed with %s" % sys.exc_info()[0],
+                level=logging.ERROR)
         self.mode(mode)
         return result
 
@@ -767,18 +791,19 @@ class NT(object):
         '''
         return self._xfer(local, remote, oper="upload", timeout=timeout)
 
-    def download(self, local, remote, timeout = 600):
+    def download(self, local, remote, timeout=600):
         '''
         Download a file from remote to local using xfer_proto
         '''
         return self._xfer(local, remote, oper="download", timeout=timeout)
-        
+
     def _xfer(self, local, remote, oper, timeout):
         result = False
         if self.xfer_proto == "scp":
-            remote=self.user + '@' + self.host + ':' + remote
+            remote = self.user + '@' + self.host + ':' + remote
         else:
-            ntlog("Only SCP is supported now, stay tuned for ftp", level=logging.ERROR)
+            ntlog("Only SCP is supported now, stay tuned for ftp",
+                level=logging.ERROR)
             return result
         if oper == "download":
             src = remote
@@ -787,7 +812,8 @@ class NT(object):
             src = local
             dst = remote
         else:
-            ntlog("unsupported file transfer operation " + str(oper), level=logging.ERROR)
+            ntlog("unsupported file transfer operation " + str(oper),
+                level=logging.ERROR)
             return result
         cmd = "scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
         cmd += " -P " + str(self.port)
@@ -799,7 +825,7 @@ class NT(object):
             xfer = pexpect.spawn(cmd)
             match_pattern = ["assword:", '100%', pexpect.EOF]
             while True:
-                i = xfer.expect(match_pattern, timeout = timeout)
+                i = xfer.expect(match_pattern, timeout=timeout)
                 if i == 0:
                     xfer.sendline(self.passwd)
                 elif i == 1:
@@ -812,7 +838,7 @@ class NT(object):
             result = False
         if result:
             ntlog("SCP %s succeeded" % cmd)
-        else :
+        else:
             ntlog(("SCP %s failed" % cmd) + msg, level=logging.ERROR)
         return result
 
@@ -829,7 +855,7 @@ class NT(object):
         elif self.os == "junos":
             self.config("set system host-name %s" % hostname)
             return True
-        else :
+        else:
             ntlog("Changing hostname in OS %s is not " % hostname +
                 "currently supported! Aborting...", logging.WARNING)
             return False
@@ -840,9 +866,9 @@ class NT(object):
         self.mode("cli")
         attempt = 1
         result = False
-        while(attempt <= retries and not result) :
+        while attempt <= retries and not result:
             sleep(timeout)
-            root=ET.fromstring(self.cmd(cmd=cmd, xml="True"))
+            root = ET.fromstring(self.cmd(cmd=cmd, xml="True"))
             if root.find(".//output") is not None:
                 ntlog("PIC is not ready yet " + root.find(".//output").text)
             else:
@@ -853,6 +879,66 @@ class NT(object):
                     result = True
             attempt += 1
 
+        return result
+
+    def chk_ospf_nbr(self, addr=None, ids=None, timeout=180, interval=10,
+        state=None):
+        cmd = "show ospf neighbor"
+        self.mode("cli")
+        result = False
+        nbr_addr = addr
+        nbr_id = ids
+        attempt = 1
+        retries = 18
+        xpath = ".//ospf-neighbor["
+        if addr is not None:
+            xpath += "neighbor-address='" + str(addr) + "']/ospf-neighbor-state"
+        elif ids is not None:
+            xpath += "neighbor-id='" + str(ids) + "']/ospf-neighbor-state"
+        else:
+            ntlog("Nbr address or Nbr Id is required", logging.ERROR)
+            return False
+        while not result and attempt < retries:
+            root = self.cmd(cmd=cmd, xml="xpath")
+            if root.find(".//output") is not None:
+                ntlog("OSPF command does not have any output yet")
+            else:
+                nbr_state_et = root.find(xpath)
+                if nbr_state_et is not None:
+                    nbr_state = nbr_state_et.text
+                    ntlog("OSPF Neighbor ID %s's state is %s" % \
+                        (nbr_id, nbr_state))
+                    if state is None:
+                        return nbr_state
+                    else:
+                        if nbr_state == state:
+                            result = True
+                            continue
+                else:
+                    ntlog("OSPF Neighbor ID %s not found" % nbr_id)
+            attempt += 1
+            sleep(interval)
+        return result
+
+    def ping(self, dest, src=None, wait=1, timeout=30, interval=5):
+        if self.os == "linux":
+            cmd = "ping -c 1 -w %d %s" % (wait, dest)
+        elif self.os == "junos":
+            cmd = "ping %s count 1 wait %d" % (dest, wait)
+        else:
+            ntlog("ping not supported on OS: %s" % self.os, logging.ERROR)
+            return False
+        result = False
+        attempt = 1
+        retries = int(timeout/interval)
+        while not result and attempt <= retries:
+            resp = self.cmd(cmd)
+            m = re.search("\s0\%\s+packet\s+loss", resp)
+            if m:
+                result = True
+                continue
+            attempt += 1
+            sleep(interval)
         return result
 
     def install_licenses(self, licenses):
@@ -866,12 +952,13 @@ class NT(object):
             if self.upload(src, dst):
                 ntlog("License %s uploaded" % filename)
             else:
-                ntlog("License %s upload failed" % filename, level=logging.ERROR)
+                ntlog("License %s upload failed" % filename,
+                    level=logging.ERROR)
                 result = False
             output = self.cli("request system license add " + dst)
             if re.search("no error", output, re.IGNORECASE):
                 ntlog("License %s applied" % filename)
-            else :
+            else:
                 result = False
                 ntlog("License %s failed to apply" % filename)
         return result
@@ -879,7 +966,8 @@ class NT(object):
     def set_snmp(self, comm_ro="public", comm_rw="private"):
         cmd = "set snmp community " + comm_ro + " authorization read-only"
         if comm_rw is not None:
-            cmd += "\nset snmp community " + comm_rw + " authorization read-write"
+            cmd += "\nset snmp community " + comm_rw + \
+                " authorization read-write"
         return self.config(cmd)
 
     def get_snmp(self, mib, comm="public"):
@@ -894,7 +982,7 @@ class NT(object):
         #if m:
         #    obj = snmpapi.ObjectType(snmpapi.ObjectIdentity(mib))
         #else:
-        #    obj = snmpapi.ObjectType(snmpapi.ObjectIdentity('SNMPv2-MIB', 
+        #    obj = snmpapi.ObjectType(snmpapi.ObjectIdentity('SNMPv2-MIB',
         #        mib, 0))
         #errorIndication, errorStatus, errorIndex, varBinds = snmppi.next(
         #    snmpapi.getCmd(SnmpEngine(),
@@ -1068,9 +1156,9 @@ def get_kpi_snapshot(rh, kpi_set):
     '''Get snapshot with kip_set and router handles'''
     kpi_ss = {} # kpi snapshot for this device
     for rid in kpi_set:
-        kpi_ss[rid] = {} 
+        kpi_ss[rid] = {}
         for kpi_key in kpi_set[rid]:
-            kpi_ss[rid][kpi_key] = get_kpi_single(rh[rid], 
+            kpi_ss[rid][kpi_key] = get_kpi_single(rh[rid],
                 get_kpi_def(name=kpi_key))
     return kpi_ss
 
@@ -1078,7 +1166,7 @@ def compare_kpi_single(base, curr, kpi):
     key, k = kpi.items()[0]
     match = 'exact'
     percent = 1
-    if 'match' in k or k['match'] == 'exact' :
+    if 'match' in k or k['match'] == 'exact':
         match = 'exact'
     elif k['match'] == 'percent':
         match = 'percent'
@@ -1094,7 +1182,7 @@ def compare_kpi_single(base, curr, kpi):
         elif match == 'percent':
             diff = abs(base[idx] - curr[idx])
             result &= (diff < 5) or (diff*1.0/base[idx]) < (percent / 100.0)
-    return result 
+    return result
 
 def compare_kpi(base, curr, kpi):
     result = True
@@ -1122,15 +1210,15 @@ def evt_precheck(event, devices):
     return result
 
 def chk_event(self, event, devices, params=None):
-    """event is a dictionary for the desirable event based on 
+    """event is a dictionary for the desirable event based on
         a set of predefined event templates
-    devices are handles of devices, it has 
+    devices are handles of devices, it has
         devices['r']: a list of router instances
         devices['h']: a list of host instances
         devices['t']: a list of tester instances
 
     event has the following key/value pairs
-    
+
         name: a short name for the event, also the key to predefined
         events
 
@@ -1150,7 +1238,7 @@ def chk_event(self, event, devices, params=None):
         present in library, or any custom update required
 
     params is optional for misellaneous environment
-    
+
     the event is declared success if impact is within the expected range,
         and steady state is reached after the event. Not used now
     """
@@ -1159,7 +1247,7 @@ def chk_event(self, event, devices, params=None):
     else:
         evt = get_event(name=event['name'])
     r_before = evt_precheck(evt, devices)
-    if r_before['status'] is False :
+    if r_before['status'] is False:
         ntlog("Baseline precheck failed, abort...")
         return False
     r_event = evt_start(evt, devices)
@@ -1194,6 +1282,6 @@ class Receiver(threading.Thread):
                 self.q.put(data)
                 #ntlog("log received: %s" % data)
             timeout = time.time() - ts > self.to
-        
-if __name__ == "__main__" :
+
+if __name__ == "__main__":
     pass

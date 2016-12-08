@@ -2,18 +2,21 @@ from nt import *
 import VmxAws
 import json,csv
 def vmx_perf():
-    va = VmxAws.VmxAws('xwuw01')
+    va = VmxAws.VmxAws('reg-vmx')
     result = []
-    lnx01 = 'xwu-lnx01'
-    lnx02 = 'xwu-lnx02'
+    lnx01 = 'reg-lnx01'
+    lnx02 = 'reg-lnx02'
     #gwoffset = [[9, 10]] #, [15, 16], [21, 22]]
-    #gwoffset = [[5, 6], [7, 8], [9, 10], [11, 12], [13, 14], [15, 16]]
-    #gwoffset = [[11, 12], [13, 14], [15, 16]]
+    #gwoffset = [[5, 6], [7, 8], [9, 10], [11, 12], [13, 14], [15, 16], [17, 18], [19, 20], [21, 22]]
+    #gwoffset = [[3, 4], [5, 6], [7, 8], [9, 10], [11, 12], [13, 14], [15, 16], [17, 18], [19, 20]]
+    #gwoffset = [[13, 14], [15, 16], [19, 20], [21, 22]]
+    #gwoffset = [[7, 8], [9, 10], [13, 14], [15, 16]]
     #gwoffset = [[17, 18], [19, 20], [21, 22]]
     #gwoffset = [[5, 6], [7, 8], [9, 10]]
-    gwoffset = [[3, 4]]
+    gwoffset = [[13, 14]]
     for gw in gwoffset :
-        result.extend(va.perf_report(lnx01, lnx02, gw_offset=gw))
+        result.extend(va.perf_report(lnx01, lnx02, gw_offset=gw, ipsecalg=[],
+            conn=["no_vmx", "direct", "bgp-ospf-gre"]))
     
     with open('result.json', 'w') as fp:
         json.dump(result, fp)

@@ -1,19 +1,21 @@
 *** Settings ***
-Library	../../pynt/VmxAws.py	vpc=xwuw01	cidr=192.168.128.0/17	subnet_mask=24	subnet_cnt=4
+Library	../../pynt/VmxAws.py	vpc=reg-vmx	cidr=192.168.128.0/17	subnet_mask=24	subnet_cnt=4
 
 *** Variables ***
-${vpc_name}	xwuw01
+${vpc_name}	reg-vmx
 ${mgmt_vpc_name}	mgmt01
-${key_file}	~/.ssh/id_rsa
-${ami_vmx}	ami-e2eba982 # 15.1F6-S1.4-9
-${ami_lnx}	ami-06116566
+${key_file}	~/.ssh/reg_aws_blr_share_id.pem
+${ami_vmx}	ami-0d551f6d# 15.1F6-S1.4-9
+${ami_lnx}	ami-c52b7ea5
 ${inst_type_vmx}	m4.xlarge
-${inst_type_lnx}	m4.xlarge
+${inst_type_lnx}	m4.10xlarge
 ${intf_per_subnet}	${25}
 ${vmx_if_cnt}	${3}
 ${vmx_subnet_cnt}	${4}
-${key_name}	xwu_pub_cloud
-${lic}	E418396532.lic:Lic20G.txt
+${key_name}	reg_aws_blr_share_id
+${lic}	/home/regress/dev/etc/E418396532.lic:/home/regress/dev/etc/Lic20G.txt
+#@{inst_types}  m4.xlarge	m4.2xlarge	m4.4xlarge	m4.10xlarge	c3.2xlarge	c3.4xlarge	c3.8xlarge	c4.2xlarge	c4.4xlarge	c4.8xlarge
+#@{inst_types}	m4.xlarge	m4.2xlarge
 
 *** Test Cases ***
 VPC Cleanup
@@ -67,8 +69,7 @@ Create VPC Peering
 Launch IPSec VMX
 	[Documentation]	Create a pair of VMX instances for performance testing
 	[Tags]	VMX
-	@{ipsecvmx}	Create List	${0}
-	Launch IPSec Instances	ipsecvmx=@{ipsecvmx}
+	Launch IPSec Instances	inst_types=@{inst_types}
 
 #Associate Public IP Address to Instance Private IP
 #	[Documentation]	Map AWS Elastic Public IP to One Elastic Network Interface
@@ -88,9 +89,9 @@ Launch Endpoint EC2 Ubuntu Hosts
 	[Tags]	VPC
 	@{ifset1}	Create List	0.1	1.1	2.1	3.1
 	@{ifset2}	Create List	0.2	1.2	2.2	3.2
-	${xwu-lnx1}	Create Dictionary	iname=xwu-lnx01	ips=@{ifset1}
-	${xwu-lnx2}	Create Dictionary	iname=xwu-lnx02	ips=@{ifset2}
-	@{params}	Create List	${xwu-lnx1}	${xwu-lnx2}
+	${reg-lnx1}	Create Dictionary	iname=reg-lnx01	ips=@{ifset1}
+	${reg-lnx2}	Create Dictionary	iname=reg-lnx02	ips=@{ifset2}
+	@{params}	Create List	${reg-lnx1}	${reg-lnx2}
 	Launch Instances	inst_params=@{params}	ami=${ami_lnx}	key_name=${key_name}	inst_type=${inst_type_lnx}
 	EIP Associate	${3}	192.168.128.5
 	EIP Associate	${4}	192.168.128.6
@@ -115,7 +116,7 @@ Launch Endpoint EC2 Ubuntu Hosts
 Setup Linux hosts
 	[Documentation]	Install necessary packages and iperf3 from github. It also stops instance, enables SRIOV, and starts instance again.
 	[Tags]	Performance
-	@{inst_names}	Create List	xwu-lnx01	xwu-lnx02
+	@{inst_names}	Create List	reg-lnx01	reg-lnx02
 	#: For	${inst_name}	in	@{inst_names}
 	#\	Cfg Lnx Hosts	${inst_name}
 	Sleep	2 minutes	Waiting for Linux to boot fully
@@ -124,7 +125,7 @@ Setup Linux hosts
 Wait for VMX to Come Up Online
 	[Documentation]	It might take up to 30 min for a new instance to come up. This is to ensure proper initliazation before proceeding with rest of testing.
 	[Tags]	Setup
-	${timeout}=	Set Variable	${1800}
+	${timeout}=	Set Variable	${3600}
 	${interval}=	Set Variable	${30}
 	Chk Reachability	host=192.168.128.7	port=${22}	timeout=${timeout}	interval=${interval}	prompt=SSH
 	Chk Reachability	host=192.168.128.8	port=${22}	timeout=${300}	interval=${10}	prompt=SSH
@@ -132,7 +133,7 @@ Wait for VMX to Come Up Online
 VMX Basic Setup
 	[Documentation]	Configure root password, interface addresses and load licenses
 	[Tags]	VMX
-	@{vmx}	Create List	vmx03	vmx04
+	@{vmx}	Create List	vmx03	vmx04	vmx05	vmx06	vmx07	vmx08	vmx09	vmx10	vmx13	vmx14	vmx15	vmx16	vmx19	vmx20	vmx21	vmx22
 	VMX Basic Setup	names=@{vmx}	licenses=${lic}
 
 #Measure Performance using IPerf3

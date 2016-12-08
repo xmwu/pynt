@@ -278,7 +278,7 @@ class Ec2Instance(object):
             ntlog("Instance %s is now running" % name)
             #waiter = self.client.get_waiter("instance_running")
             #waiter.wait(InstanceId = inst.instance_id)
-            inst.create_tags(Tags = [{'Key': 'Name', 'Value': name}])
+            throttle(inst.create_tags, Tags=[{'Key': 'Name', 'Value': name}])
             timer.stop()
         evpc.ec2instances[self.name] = self
 
@@ -475,6 +475,13 @@ class Ec2Vpc(object):
         self.nets_cidr=self.get_subnet_cidr() # 
         self.gw = self.get_internet_gateway()
         self.rtts = self.get_route_tables()
+        [cidr_net, cidr_mask] = self.cidr.split("/")
+        lo0_net_dec = ip2decimal(cidr_net) + (2 ** (32-self.subnet_mask)) * \
+            (2 ** (int(self.subnet_mask) - int(cidr_mask)) - 1)
+        self.lo0_net = decimal2ip(lo0_net_dec)
+        gre_net_dec = lo0_net_dec - 2 ** self.subnet_mask
+        self.gre_nets = get_subnets(base = decimal2ip(gre_net_dec) + "/" + \
+                str(self.subnet_mask), mask = 30)
         self.ec2instances = {}
         self.update_ec2instances()
 
@@ -1297,6 +1304,10 @@ class IPerf:
 
     def summary(self, result):
         pass
+
+    def chk_connect(self, timeout=60):
+        result = False
+        return self.hs.ping(dest = self.caddr, timeout = timeout)
 
     def get_bandwidth(self, duration = None, udp=None, enable_json=True,
         mss=None):
